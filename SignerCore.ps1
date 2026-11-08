@@ -316,9 +316,9 @@ function Get-ExeReport {
     param([string]$Path)
     $item = Get-Item -LiteralPath $Path
     $pe = Read-PeInfo $Path
-    $ver = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($item.FullName)
+    $ver = try { [System.Diagnostics.FileVersionInfo]::GetVersionInfo($item.FullName) } catch { $null }
     $sig = Get-AuthenticodeSignature -LiteralPath $item.FullName
-    $hash = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash
+    $hash = try { (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash } catch { $null }
     $zone = $null
     try { $zone = Get-Content -LiteralPath $item.FullName -Stream Zone.Identifier -ErrorAction Stop } catch { }
     $zoneId = $null
@@ -330,10 +330,10 @@ function Get-ExeReport {
         SizeBytes     = $item.Length
         Sha256        = $hash
         Pe            = $pe
-        ProductName   = $ver.ProductName
-        CompanyName   = $ver.CompanyName
-        FileVersion   = $ver.FileVersion
-        Description   = $ver.FileDescription
+        ProductName   = if ($ver) { $ver.ProductName } else { $null }
+        CompanyName   = if ($ver) { $ver.CompanyName } else { $null }
+        FileVersion   = if ($ver) { $ver.FileVersion } else { $null }
+        Description   = if ($ver) { $ver.FileDescription } else { $null }
         SigStatus     = [string]$sig.Status
         SigType       = [string]$sig.SignatureType
         SigMessage    = $sig.StatusMessage
@@ -351,7 +351,13 @@ function Get-PeNormalizedHash {
     # appended signature block. Two builds of the same program give the same value whether
     # or not they are signed, so it tells code-identity apart from the signature.
     param([string]$Path)
-    $bytes = [IO.File]::ReadAllBytes($Path)
+    # shared read so a file another process holds open (a running installer, AV scan) does not abort us
+    $fsIn = [IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
+    try {
+        $bytes = New-Object byte[] $fsIn.Length
+        $off = 0
+        while ($off -lt $bytes.Length) { $n = $fsIn.Read($bytes, $off, $bytes.Length - $off); if ($n -le 0) { break }; $off += $n }
+    } finally { $fsIn.Dispose() }
     if ($bytes.Length -lt 64) { return $null }
     $ms = New-Object IO.MemoryStream (, $bytes)
     $br = New-Object IO.BinaryReader $ms

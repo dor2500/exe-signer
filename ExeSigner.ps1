@@ -1010,6 +1010,29 @@ function Set-DropHover([bool]$on) {
 # --- compare / cross-check mode ---------------------------------------------
 $script:CmpSigned = $null
 $script:CmpUnsigned = $null
+$script:CmpJob = $null
+$cmpTimer = New-Object Windows.Threading.DispatcherTimer
+$cmpTimer.Interval = [TimeSpan]::FromMilliseconds(150)
+$cmpTimer.Add_Tick({
+    $j = $script:CmpJob
+    if (-not $j) { $cmpTimer.Stop(); return }
+    if (-not $j.Handle.IsCompleted) { return }
+    $cmpTimer.Stop(); $script:CmpJob = $null
+    try {
+        $res = $j.PS.EndInvoke($j.Handle)
+        $cc = $res | Where-Object { $_.Verdict } | Select-Object -Last 1
+        if (-not $cc) {
+            $err = $j.PS.Streams.Error | Select-Object -First 1
+            throw ([string](if ($err) { $err } else { 'ההשוואה לא החזירה תוצאה.' }))
+        }
+        Render-Compare $cc
+    } catch {
+        $ex = $_.Exception; while ($ex.InnerException) { $ex = $ex.InnerException }
+        Show-CompareError $ex.Message
+    } finally {
+        $j.PS.Dispose()
+    }
+})
 
 function Set-AppMode([string]$mode) {
     $compare = ($mode -eq 'compare')
@@ -1028,9 +1051,9 @@ function Set-CmpHover([string]$slot, [bool]$on) {
 
 function Set-CmpZone([string]$slot, [string]$path) {
     $name = [IO.Path]::GetFileName($path)
-    $sig = Get-AuthenticodeSignature -LiteralPath $path
-    $isSigned = ($sig.SignerCertificate -and [string]$sig.SignatureType -eq 'Authenticode')
-    $sub = if ($sig.Status -eq 'Valid') { 'חתום ותקף' } elseif ($isSigned) { 'חתום (תעודה לא מאושרת)' } else { 'לא חתום' }
+    $sig = try { Get-AuthenticodeSignature -LiteralPath $path } catch { $null }
+    $isSigned = ($sig -and $sig.SignerCertificate -and [string]$sig.SignatureType -eq 'Authenticode')
+    $sub = if (-not $sig) { 'נטען' } elseif ($sig.Status -eq 'Valid') { 'חתום ותקף' } elseif ($isSigned) { 'חתום (תעודה לא מאושרת)' } else { 'לא חתום' }
     $col = if ($isSigned) { $Pal.ok } else { $Pal.muted }
     if ($slot -eq 'signed') {
         $ui.SignedName.Text = $name; $ui.SignedSub.Text = $sub
@@ -1050,9 +1073,48 @@ function Open-CompareFile([string]$slot, [string]$path) {
     if ($script:CmpSigned -and $script:CmpUnsigned) { Show-Compare }
 }
 
+function Show-CompareBusy {
+    $ui.CmpEmpty.Visibility = 'Collapsed'
+    $ui.CmpResult.Visibility = 'Visible'
+    $ui.CmpRows.Children.Clear()
+    $ui.BtnCmpSign.Visibility = 'Collapsed'
+    $col = $Pal.info
+    $ui.CmpIconBg.Background = Get-Brush (Get-Tint $col '22')
+    $ui.CmpIcon.Foreground = Get-Brush $col
+    $ui.CmpIcon.Text = [string][char]0xE895
+    $ui.CmpHeadline.Foreground = Get-Brush $col
+    $ui.CmpHeadline.Text = 'משווה את הקבצים…'
+    $ui.CmpSub.Text = 'מחשב Hash של התוכן. בקבצים גדולים זה עשוי לקחת כמה שניות.'
+}
+
+function Show-CompareError([string]$msg) {
+    $ui.CmpEmpty.Visibility = 'Collapsed'
+    $ui.CmpResult.Visibility = 'Visible'
+    $ui.CmpRows.Children.Clear()
+    $ui.BtnCmpSign.Visibility = 'Collapsed'
+    $col = $Pal.bad
+    $ui.CmpIconBg.Background = Get-Brush (Get-Tint $col '22')
+    $ui.CmpIcon.Foreground = Get-Brush $col
+    $ui.CmpIcon.Text = [string][char]0xE783
+    $ui.CmpHeadline.Foreground = Get-Brush $col
+    $ui.CmpHeadline.Text = 'לא הצלחתי להשוות את הקבצים'
+    $ui.CmpSub.Text = 'ודא ששני הקבצים קיימים ואינם נעולים על ידי תוכנה אחרת, ונסה שוב.'
+    Add-Row 'שגיאה' $msg 'bad' -Container $ui.CmpRows
+    Write-Log ("Compare ERROR: " + $msg)
+}
+
 function Show-Compare {
-    try { $cc = Get-CrossCheck $script:CmpSigned $script:CmpUnsigned }
-    catch { Write-Log ("Compare ERROR: " + $_.Exception.Message); return }
+    if (-not ($script:CmpSigned -and $script:CmpUnsigned)) { return }
+    if ($script:CmpJob) { try { $script:CmpJob.PS.Stop() } catch { }; try { $script:CmpJob.PS.Dispose() } catch { }; $script:CmpJob = $null; $cmpTimer.Stop() }
+    Show-CompareBusy
+    $ps = [powershell]::Create()
+    [void]$ps.AddScript({ param($core, $a, $b); . $core; Get-CrossCheck $a $b })
+    foreach ($arg in @($CorePath, $script:CmpSigned, $script:CmpUnsigned)) { [void]$ps.AddArgument($arg) }
+    $script:CmpJob = @{ PS = $ps; Handle = $ps.BeginInvoke() }
+    $cmpTimer.Start()
+}
+
+function Render-Compare($cc) {
     $ui.CmpEmpty.Visibility = 'Collapsed'
     $ui.CmpResult.Visibility = 'Visible'
     $ui.CmpRows.Children.Clear()
@@ -1328,8 +1390,8 @@ $win.Add_ContentRendered({
         $script:ShotTimer = New-Object Windows.Threading.DispatcherTimer
         $script:ShotTimer.Interval = [TimeSpan]::FromMilliseconds(1200)
         $script:ShotTimer.Add_Tick({
-            # with -AutoSign, wait for signing to finish (max 60s)
-            if ($script:SignJob -and ((Get-Date) - $script:ShotStarted).TotalSeconds -lt 60) { return }
+            # wait for signing or comparison to finish (max 60s)
+            if (($script:SignJob -or $script:CmpJob) -and ((Get-Date) - $script:ShotStarted).TotalSeconds -lt 60) { return }
             $script:ShotTimer.Stop()
             $root = $ui.Root
             $scale = 1.5
