@@ -86,6 +86,135 @@ function Import-PfxForSigning {
     return $cert
 }
 
+function Find-PrivateKeyFile {
+    # Looks for a PEM private key next to a .cer/.crt (same base name, .key / .pem / -key.pem)
+    param([string]$CertPath)
+    $dir = Split-Path $CertPath
+    $base = [IO.Path]::GetFileNameWithoutExtension($CertPath)
+    foreach ($n in "$base.key", "$base.pem", "$base-key.pem", "$base.key.pem", "$base.private.key") {
+        $p = Join-Path $dir $n
+        if ((Test-Path -LiteralPath $p) -and ([IO.Path]::GetFullPath($p) -ne [IO.Path]::GetFullPath($CertPath))) {
+            if ((Get-Content -LiteralPath $p -Raw) -match 'PRIVATE KEY-----') { return $p }
+        }
+    }
+    return $null
+}
+
+function Merge-CertAndKeyWithPwsh {
+    # Windows PowerShell 5.1 (.NET Framework) cannot read PEM private keys; PowerShell 7 can.
+    param([string]$CertPath, [string]$KeyPath, [System.Security.SecureString]$Password)
+    $pwsh = (Get-Command pwsh -ErrorAction SilentlyContinue).Source
+    if (-not $pwsh) {
+        throw ('Reading a PEM private key needs PowerShell 7 (winget install Microsoft.PowerShell), ' +
+               'or convert it to PFX: openssl pkcs12 -export -in cert.crt -inkey cert.key -out cert.pfx')
+    }
+    $plain = (New-Object System.Net.NetworkCredential('', $Password)).Password
+    $tmpPw = [guid]::NewGuid().ToString('N')
+    $script = @'
+$ErrorActionPreference = 'Stop'
+try {
+    $c = $env:ES_CERT; $k = $env:ES_KEY; $p = $env:ES_PASS
+    $keyText = [IO.File]::ReadAllText($k)
+    if (-not $p -and $keyText -match 'ENCRYPTED PRIVATE KEY|Proc-Type: 4,ENCRYPTED') { [Console]::Out.WriteLine('ERR:KEY_ENCRYPTED'); exit 3 }
+    $certText = $null
+    try { $certText = [IO.File]::ReadAllText($c) } catch { }
+    $X = [Security.Cryptography.X509Certificates.X509Certificate2]
+    $cert = if ($certText -match 'BEGIN CERTIFICATE') { $X::CreateFromPem($certText) } else { $X::new([IO.File]::ReadAllBytes($c)) }
+    $isEc = $cert.PublicKey.Oid.Value -eq '1.2.840.10045.2.1'
+    $key = if ($isEc) { [Security.Cryptography.ECDsa]::Create() } else { [Security.Cryptography.RSA]::Create() }
+    if ($p) { $key.ImportFromEncryptedPem($keyText, $p) } else { $key.ImportFromPem($keyText) }
+    $withKey = if ($isEc) { [Security.Cryptography.X509Certificates.ECDsaCertificateExtensions]::CopyWithPrivateKey($cert, $key) }
+               else { [Security.Cryptography.X509Certificates.RSACertificateExtensions]::CopyWithPrivateKey($cert, $key) }
+    [Console]::Out.WriteLine('OK:' + [Convert]::ToBase64String($withKey.Export('Pfx', $env:ES_TMP)))
+} catch {
+    $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }
+    [Console]::Out.WriteLine('ERR:' + $e.Message); exit 2
+}
+'@
+    $env:ES_CERT = $CertPath; $env:ES_KEY = $KeyPath; $env:ES_PASS = $plain; $env:ES_TMP = $tmpPw
+    $oldEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
+        $out = @(& $pwsh -NoProfile -NonInteractive -EncodedCommand $enc 2>$null) | ForEach-Object { [string]$_ }
+        $ok = $out | Where-Object { $_ -like 'OK:*' } | Select-Object -Last 1
+        if (-not $ok) {
+            $msg = (($out | Where-Object { $_ -like 'ERR:*' } | Select-Object -Last 1) -replace '^ERR:', '')
+            if (-not $msg) { $msg = ($out -join ' ').Trim() }
+            if ($msg -match 'KEY_ENCRYPTED') { throw 'The private key is encrypted: type its password and load the file again.' }
+            if ($msg -match 'does not match') { throw 'The private key does not belong to this certificate.' }
+            if ($msg -match 'password|decrypt|padding|PKCS') { throw 'Wrong password for the encrypted private key.' }
+            throw ('Could not combine the certificate and key: ' + $msg)
+        }
+        $bytes = [Convert]::FromBase64String($ok.Substring(3).Trim())
+    } finally {
+        $ErrorActionPreference = $oldEap
+        Remove-Item Env:ES_CERT, Env:ES_KEY, Env:ES_PASS, Env:ES_TMP -ErrorAction SilentlyContinue
+    }
+    $flags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::UserKeySet
+    return [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($bytes, $tmpPw, $flags)
+}
+
+function Import-CertFileForSigning {
+    # Loads a certificate for signing from .pfx/.p12, or from .cer/.crt/.pem.
+    # A .cer/.crt holds only the public certificate, so the private key is found by:
+    #   1. the same certificate already installed with its key (store, USB token)
+    #   2. a pending certificate request created on this PC (certreq -accept binds it)
+    #   3. a PEM key file (given, inside the same .pem, or next to the certificate)
+    param([string]$Path, [System.Security.SecureString]$Password, [string]$KeyPath, [scriptblock]$Log = { param($m) })
+    if (-not $Password) { $Password = New-Object System.Security.SecureString }
+    $ext = [IO.Path]::GetExtension($Path).ToLowerInvariant()
+    if ($ext -in '.pfx', '.p12') { return (Import-PfxForSigning -Path $Path -Password $Password) }
+
+    $text = $null
+    try { $text = [IO.File]::ReadAllText($Path) } catch { }
+    if ($text -and $text -match 'BEGIN CERTIFICATE') {
+        $m = [regex]::Match($text, '-----BEGIN CERTIFICATE-----(.+?)-----END CERTIFICATE-----', 'Singleline')
+        $pub = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 (, [Convert]::FromBase64String(($m.Groups[1].Value -replace '\s', '')))
+    } else {
+        $pub = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 (, [IO.File]::ReadAllBytes($Path))
+    }
+    & $Log ("Certificate file: " + $pub.Subject + " (" + $pub.Thumbprint + ")")
+    if ($pub.NotAfter -lt (Get-Date)) { throw ('This certificate expired on ' + $pub.NotAfter.ToString('dd/MM/yyyy')) }
+    if (-not (Test-CanSignCode ([pscustomobject]@{ HasPrivateKey = $true; Extensions = $pub.Extensions }))) {
+        throw 'This certificate is not allowed to sign code (no Code Signing usage).'
+    }
+
+    # 1. already installed together with its private key?
+    foreach ($loc in 'Cert:\CurrentUser\My', 'Cert:\LocalMachine\My') {
+        $hit = Get-ChildItem $loc -ErrorAction SilentlyContinue | Where-Object { $_.Thumbprint -eq $pub.Thumbprint -and $_.HasPrivateKey } | Select-Object -First 1
+        if ($hit) { & $Log "Found the matching private key in $loc"; return $hit }
+    }
+
+    # 2. issued for a request (CSR) that was created on this PC?
+    $pubKey = [Convert]::ToBase64String($pub.PublicKey.EncodedKeyValue.RawData)
+    foreach ($scope in @(@{ Loc = 'Cert:\CurrentUser\REQUEST'; Arg = '-user' }, @{ Loc = 'Cert:\LocalMachine\REQUEST'; Arg = '-machine' })) {
+        $req = Get-ChildItem $scope.Loc -ErrorAction SilentlyContinue |
+            Where-Object { [Convert]::ToBase64String($_.PublicKey.EncodedKeyValue.RawData) -eq $pubKey } | Select-Object -First 1
+        if ($req) {
+            & $Log ("Found the pending request for this certificate; installing it with certreq -accept " + $scope.Arg)
+            $null = & certreq.exe -q -accept $scope.Arg $Path 2>&1
+            $my = $scope.Loc -replace 'REQUEST$', 'My'
+            $hit = Get-ChildItem $my -ErrorAction SilentlyContinue | Where-Object { $_.Thumbprint -eq $pub.Thumbprint -and $_.HasPrivateKey } | Select-Object -First 1
+            if ($hit) { return $hit }
+        }
+    }
+
+    # 3. PEM private key
+    if (-not $KeyPath -and $text -match 'PRIVATE KEY-----') { $KeyPath = $Path }
+    if (-not $KeyPath) { $KeyPath = Find-PrivateKeyFile $Path }
+    if ($KeyPath) {
+        & $Log ("Using private key file " + $KeyPath)
+        $cert = Merge-CertAndKeyWithPwsh -CertPath $Path -KeyPath $KeyPath -Password $Password
+        if ($cert.Thumbprint -ne $pub.Thumbprint) { throw 'The private key does not belong to this certificate.' }
+        return $cert
+    }
+
+    $e = New-Object System.InvalidOperationException ('NEEDS_KEY: ' + $pub.Subject)
+    $e.Data['NeedsKey'] = $true
+    throw $e
+}
+
 function Get-CertDisplayName {
     param($Cert)
     $cn = if ($Cert.Subject -match 'CN=("[^"]+"|[^,]+)') { $Matches[1].Trim('"') } else { $Cert.Subject }

@@ -6,7 +6,8 @@ param(
     [string]$Publisher,           # optional: override the saved publisher name
     [switch]$AutoSign,            # optional: sign InitialFile right away (used with -Screenshot for demos/tests)
     [ValidateSet('', 'auto', 'existing')][string]$Mode,   # optional: certificate source
-    [string]$PfxPath              # optional: preload a PFX (password from $env:EXESIGNER_PFX_PASSWORD)
+    [string]$PfxPath,             # optional: preload a PFX/CER/CRT (password from $env:EXESIGNER_PFX_PASSWORD)
+    [string]$CertKeyPath          # optional: PEM private key for a .cer/.crt given in -PfxPath
 )
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
@@ -445,14 +446,14 @@ if ($Mode) { $settings.Mode = $Mode }
                          ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
                 <TextBlock Name="CertListEmpty" Visibility="Collapsed" Foreground="{StaticResource Muted}" FontSize="12.5" TextWrapping="Wrap"
                            Text="לא נמצאו במחשב תעודות לחתימת קוד. אפשר לטעון קובץ PFX."/>
-                <TextBlock Text="או טעינה מקובץ PFX / P12" Foreground="{StaticResource Muted}" FontSize="12.5" Margin="0,12,0,6"/>
+                <TextBlock Text="או טעינה מקובץ PFX / P12 / CER / CRT" Foreground="{StaticResource Muted}" FontSize="12.5" Margin="0,12,0,6"/>
                 <Grid>
                   <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="10"/>
                     <ColumnDefinition Width="Auto"/>
                   </Grid.ColumnDefinitions>
-                  <PasswordBox Name="PfxPassword" Style="{StaticResource PwInput}" ToolTip="סיסמת קובץ ה-PFX (אם יש)"/>
+                  <PasswordBox Name="PfxPassword" Style="{StaticResource PwInput}" ToolTip="סיסמת קובץ ה-PFX או של המפתח הפרטי (אם יש)"/>
                   <Button Name="BtnPfx" Grid.Column="2" Style="{StaticResource Btn}">
                     <StackPanel Orientation="Horizontal">
                       <TextBlock Style="{StaticResource Icon}" Text="&#xE8E5;" FontSize="13" Margin="0,0,8,0"/>
@@ -460,7 +461,7 @@ if ($Mode) { $settings.Mode = $Mode }
                     </StackPanel>
                   </Button>
                 </Grid>
-                <TextBlock Text="קודם מקלידים סיסמה, ואז בוחרים את הקובץ. הקובץ לא מותקן במחשב." Foreground="{StaticResource Muted}" FontSize="11.5" Margin="0,6,0,0" TextWrapping="Wrap"/>
+                <TextBlock Text="קודם מקלידים סיסמה (אם יש), ואז בוחרים את הקובץ. ל-CER/CRT צריך גם את המפתח הפרטי: מהמחשב או מקובץ ‎.key." Foreground="{StaticResource Muted}" FontSize="11.5" Margin="0,6,0,0" TextWrapping="Wrap"/>
               </StackPanel>
 
               <Border Margin="0,12,0,0" CornerRadius="11" Background="{StaticResource Bg}" Padding="14,11">
@@ -746,7 +747,7 @@ function New-CertListItem($cert, [bool]$fromPfx) {
         $tag = New-Object Windows.Controls.Border
         $tag.Background = Get-Brush '#2A2F5C'; $tag.CornerRadius = '5'; $tag.Padding = '6,1'; $tag.Margin = '8,0,0,0'
         $tt = New-Object Windows.Controls.TextBlock
-        $tt.Text = 'PFX'; $tt.FontSize = 10.5; $tt.Foreground = Get-Brush '#AFC0FF'
+        $tt.Text = $(if ($script:FileTag) { $script:FileTag } else { 'PFX' });$tt.FontSize = 10.5; $tt.Foreground = Get-Brush '#AFC0FF'
         $tag.Child = $tt
         [void]$top.Children.Add($tag)
     }
@@ -841,20 +842,41 @@ function Set-Mode([string]$mode) {
     Update-Cert
 }
 
-function Import-PfxFromUi([string]$path, [System.Security.SecureString]$password) {
+function Import-CertFromUi([string]$path, [System.Security.SecureString]$password, [string]$keyPath, [switch]$NoKeyPrompt) {
+    $isPfx = [IO.Path]::GetExtension($path) -match '^\.(pfx|p12)$'
     try {
-        $cert = Import-PfxForSigning -Path $path -Password $password
+        $cert = Import-CertFileForSigning -Path $path -Password $password -KeyPath $keyPath -Log { param($m) Write-Log $m }
         $script:PfxCert = $cert
+        $script:FileTag = [IO.Path]::GetExtension($path).TrimStart('.').ToUpperInvariant()
         Update-CertList $cert.Thumbprint
         Update-Cert
-        Write-Log ("Loaded PFX: " + $cert.Subject + " (" + $cert.Thumbprint + ")")
+        Write-Log ("Loaded certificate: " + $cert.Subject + " (" + $cert.Thumbprint + ")")
         Show-Banner 'ok' ('התעודה נטענה: ' + (Get-CertDisplayName $cert))
     } catch {
         $ex = $_.Exception
         while ($ex.InnerException) { $ex = $ex.InnerException }
-        Write-Log ("PFX ERROR: " + $ex.Message)
-        if ($ex -is [System.Security.Cryptography.CryptographicException]) {
+        Write-Log ("CERT ERROR: " + $ex.Message)
+        if ($ex.Data['NeedsKey']) {
+            if (-not $NoKeyPrompt) {
+                Show-Banner 'warn' 'קובץ CER/CRT מכיל רק את החלק הציבורי של התעודה. בחר עכשיו את קובץ המפתח הפרטי (.key / .pem).'
+                $dlg = New-Object Microsoft.Win32.OpenFileDialog
+                $dlg.Title = 'בחר את המפתח הפרטי של התעודה'
+                $dlg.Filter = 'מפתח פרטי (*.key;*.pem)|*.key;*.pem|כל הקבצים (*.*)|*.*'
+                $dlg.InitialDirectory = Split-Path $path
+                if ($dlg.ShowDialog($win)) { Import-CertFromUi $path $password $dlg.FileName -NoKeyPrompt; return }
+            }
+            Show-Banner 'bad' ('לא נמצא המפתח הפרטי של התעודה, ובלעדיו אי אפשר לחתום. אפשר: להתקין אותה עם המפתח (למשל מטוקן או מ-PFX), ' +
+                'לבחור קובץ ‎.key מתאים, או לקבל מהספק קובץ PFX.')
+        } elseif ($isPfx -and $ex -is [System.Security.Cryptography.CryptographicException]) {
             Show-Banner 'bad' 'לא הצלחתי לפתוח את הקובץ. כנראה שהסיסמה שגויה: הקלד אותה ובחר את הקובץ שוב.'
+        } elseif ($ex.Message -match 'encrypted') {
+            Show-Banner 'bad' 'המפתח הפרטי מוצפן: הקלד את הסיסמה שלו ובחר את הקובץ שוב.'
+        } elseif ($ex.Message -match 'does not belong|does not match') {
+            Show-Banner 'bad' 'המפתח הפרטי שבחרת לא שייך לתעודה הזו.'
+        } elseif ($ex.Message -match 'not allowed to sign code') {
+            Show-Banner 'bad' 'התעודה הזו לא מיועדת לחתימת קוד (חסר Code Signing).'
+        } elseif ($ex.Message -match 'expired') {
+            Show-Banner 'bad' ('פג התוקף של התעודה. ' + $ex.Message)
         } else {
             Show-Banner 'bad' ('טעינת התעודה נכשלה: ' + $ex.Message)
         }
@@ -1000,8 +1022,8 @@ $ui.CertList.Add_SelectionChanged({
 })
 $ui.BtnPfx.Add_Click({
     $dlg = New-Object Microsoft.Win32.OpenFileDialog
-    $dlg.Filter = 'תעודה עם מפתח (*.pfx;*.p12)|*.pfx;*.p12|כל הקבצים (*.*)|*.*'
-    if ($dlg.ShowDialog($win)) { Import-PfxFromUi $dlg.FileName $ui.PfxPassword.SecurePassword }
+    $dlg.Filter = 'קובצי תעודה (*.pfx;*.p12;*.cer;*.crt;*.pem;*.der)|*.pfx;*.p12;*.cer;*.crt;*.pem;*.der|כל הקבצים (*.*)|*.*'
+    if ($dlg.ShowDialog($win)) { Import-CertFromUi $dlg.FileName $ui.PfxPassword.SecurePassword }
 })
 
 $ui.BtnTrust.Add_Click({
@@ -1039,7 +1061,7 @@ if ($PfxPath) {
     if ($env:EXESIGNER_PFX_PASSWORD) { foreach ($ch in $env:EXESIGNER_PFX_PASSWORD.ToCharArray()) { $pw.AppendChar($ch) } }
     $settings.Mode = 'existing'
     Set-Mode 'existing'
-    Import-PfxFromUi $PfxPath $pw
+    Import-CertFromUi $PfxPath $pw $CertKeyPath -NoKeyPrompt
 } else {
     Set-Mode $settings.Mode
 }
