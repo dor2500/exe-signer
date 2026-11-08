@@ -308,7 +308,7 @@ function Read-PeInfo {
         if ($r.HasSignatureBlock) {
             $r.SignatureEndsAtEof = (($dd[4][0] + $dd[4][1]) -ge $fs.Length)
         }
-    } finally { $fs.Dispose() }
+    } finally { if ($fs) { $fs.Dispose() } }
     return $r
 }
 
@@ -357,7 +357,7 @@ function Get-PeNormalizedHash {
         $bytes = New-Object byte[] $fsIn.Length
         $off = 0
         while ($off -lt $bytes.Length) { $n = $fsIn.Read($bytes, $off, $bytes.Length - $off); if ($n -le 0) { break }; $off += $n }
-    } finally { $fsIn.Dispose() }
+    } finally { if ($fsIn) { $fsIn.Dispose() } }
     if ($bytes.Length -lt 64) { return $null }
     $ms = New-Object IO.MemoryStream (, $bytes)
     $br = New-Object IO.BinaryReader $ms

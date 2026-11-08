@@ -315,6 +315,7 @@ if ($Mode) { $settings.Mode = $Mode }
             <TextBlock Style="{StaticResource Icon}" Text="&#xEA18;" Foreground="White" FontSize="16"/>
           </Border>
           <TextBlock Text="Exe Signer" Foreground="{StaticResource Fg}" FontSize="16" FontWeight="SemiBold" Margin="12,0,0,0" VerticalAlignment="Center"/>
+          <TextBlock Name="VersionLabel" Foreground="{StaticResource Muted}" FontSize="11.5" Margin="8,0,0,0" VerticalAlignment="Center"/>
         </StackPanel>
         <Border HorizontalAlignment="Center" VerticalAlignment="Center" Background="#171B30" CornerRadius="10" Padding="4"
                 BorderBrush="{StaticResource Stroke}" BorderThickness="1" WindowChrome.IsHitTestVisibleInChrome="True">
@@ -1363,6 +1364,7 @@ if ($PfxPath) {
 } else {
     Set-Mode $settings.Mode
 }
+$ui.VersionLabel.Text = 'v1.2'
 Write-Log 'Ready. Drop an EXE to inspect it.'
 if ($ShowLog) { $ui.LogPanel.Visibility = 'Visible' }
 
