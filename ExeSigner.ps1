@@ -7,7 +7,9 @@ param(
     [switch]$AutoSign,            # optional: sign InitialFile right away (used with -Screenshot for demos/tests)
     [ValidateSet('', 'auto', 'existing')][string]$Mode,   # optional: certificate source
     [string]$PfxPath,             # optional: preload a PFX/CER/CRT (password from $env:EXESIGNER_PFX_PASSWORD)
-    [string]$CertKeyPath          # optional: PEM private key for a .cer/.crt given in -PfxPath
+    [string]$CertKeyPath,         # optional: PEM private key for a .cer/.crt given in -PfxPath
+    [string]$CompareSigned,       # optional: open compare mode with this signed file...
+    [string]$CompareUnsigned      # ...and this original unsigned file
 )
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
@@ -312,10 +314,14 @@ if ($Mode) { $settings.Mode = $Mode }
             <TextBlock Style="{StaticResource Icon}" Text="&#xEA18;" Foreground="White" FontSize="16"/>
           </Border>
           <TextBlock Text="Exe Signer" Foreground="{StaticResource Fg}" FontSize="16" FontWeight="SemiBold" Margin="12,0,0,0" VerticalAlignment="Center"/>
-          <Border Background="#1E2342" CornerRadius="6" Padding="8,2" Margin="12,0,0,0" VerticalAlignment="Center">
-            <TextBlock Text="בדיקה וחתימה דיגיטלית לקבצי הפעלה" Foreground="{StaticResource Muted}" FontSize="12.5"/>
-          </Border>
         </StackPanel>
+        <Border HorizontalAlignment="Center" VerticalAlignment="Center" Background="#171B30" CornerRadius="10" Padding="4"
+                BorderBrush="{StaticResource Stroke}" BorderThickness="1" WindowChrome.IsHitTestVisibleInChrome="True">
+          <StackPanel Orientation="Horizontal">
+            <RadioButton Name="TabSign" GroupName="AppMode" Style="{StaticResource Seg}" Content="בדיקה וחתימה" IsChecked="True" MinWidth="120"/>
+            <RadioButton Name="TabCompare" GroupName="AppMode" Style="{StaticResource Seg}" Content="הצלבת חתום / מקורי" MinWidth="150"/>
+          </StackPanel>
+        </Border>
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" WindowChrome.IsHitTestVisibleInChrome="True">
           <Button Name="BtnMin" Style="{StaticResource BtnChrome}" Content="&#xE921;"/>
           <Button Name="BtnMax" Style="{StaticResource BtnChrome}" Content="&#xE922;"/>
@@ -323,7 +329,8 @@ if ($Mode) { $settings.Mode = $Mode }
         </StackPanel>
       </Grid>
 
-      <Grid Grid.Row="1" Margin="22,4,22,22">
+      <Grid Grid.Row="1">
+      <Grid Name="SignPage" Margin="22,4,22,22">
         <Grid.ColumnDefinitions>
           <ColumnDefinition Width="*"/>
           <ColumnDefinition Width="20"/>
@@ -553,6 +560,82 @@ if ($Mode) { $settings.Mode = $Mode }
           </StackPanel>
         </Grid>
       </Grid>
+
+      <!-- ===== COMPARE PAGE ===== -->
+      <Grid Name="ComparePage" Margin="22,4,22,22" Visibility="Collapsed">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <Grid>
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="18"/>
+            <ColumnDefinition Width="*"/>
+          </Grid.ColumnDefinitions>
+
+          <Border Name="DropSigned" CornerRadius="16" Background="#161A2E" Height="150" Cursor="Hand" AllowDrop="True">
+            <Grid>
+              <Rectangle Name="DashSigned" RadiusX="16" RadiusY="16" Stroke="#39416E" StrokeThickness="1.6" StrokeDashArray="5 4"/>
+              <Border CornerRadius="7" Background="#232A52" Padding="9,3" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="14">
+                <TextBlock Text="הקובץ החתום" Foreground="#8FA8FF" FontSize="12" FontWeight="SemiBold"/>
+              </Border>
+              <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Margin="12,14,12,0">
+                <TextBlock Name="SignedIcon" Style="{StaticResource Icon}" Text="&#xE730;" FontSize="26" Foreground="#8FA8FF"/>
+                <TextBlock Name="SignedName" Text="גרור לכאן את הקובץ החתום" Foreground="{StaticResource Fg}" FontSize="15" FontWeight="SemiBold" Margin="0,10,0,2" HorizontalAlignment="Center" TextTrimming="CharacterEllipsis" MaxWidth="280"/>
+                <TextBlock Name="SignedSub" Text="ה-EXE עם החתימה הדיגיטלית" Foreground="{StaticResource Muted}" FontSize="12" HorizontalAlignment="Center"/>
+              </StackPanel>
+            </Grid>
+          </Border>
+
+          <Border Name="DropUnsigned" Grid.Column="2" CornerRadius="16" Background="#161A2E" Height="150" Cursor="Hand" AllowDrop="True">
+            <Grid>
+              <Rectangle Name="DashUnsigned" RadiusX="16" RadiusY="16" Stroke="#39416E" StrokeThickness="1.6" StrokeDashArray="5 4"/>
+              <Border CornerRadius="7" Background="#232A52" Padding="9,3" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="14">
+                <TextBlock Text="הקובץ המקורי" Foreground="#8FA8FF" FontSize="12" FontWeight="SemiBold"/>
+              </Border>
+              <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Margin="12,14,12,0">
+                <TextBlock Name="UnsignedIcon" Style="{StaticResource Icon}" Text="&#xE7C3;" FontSize="26" Foreground="#8FA8FF"/>
+                <TextBlock Name="UnsignedName" Text="גרור לכאן את הקובץ המקורי" Foreground="{StaticResource Fg}" FontSize="15" FontWeight="SemiBold" Margin="0,10,0,2" HorizontalAlignment="Center" TextTrimming="CharacterEllipsis" MaxWidth="280"/>
+                <TextBlock Name="UnsignedSub" Text="ה-EXE לפני החתימה" Foreground="{StaticResource Muted}" FontSize="12" HorizontalAlignment="Center"/>
+              </StackPanel>
+            </Grid>
+          </Border>
+        </Grid>
+
+        <Border Grid.Row="1" Style="{StaticResource Card}" Margin="0,18,0,0" Padding="0">
+          <Grid>
+            <StackPanel Name="CmpEmpty" VerticalAlignment="Center" HorizontalAlignment="Center" Margin="24,0">
+              <TextBlock Style="{StaticResource Icon}" Text="&#xE8AB;" FontSize="40" Foreground="#39416E" HorizontalAlignment="Center"/>
+              <TextBlock Text="טען את שני הקבצים כדי להציג את ההצלבה" Foreground="{StaticResource Fg}" FontSize="16" FontWeight="SemiBold" Margin="0,14,0,4" HorizontalAlignment="Center"/>
+              <TextBlock Text="הכלי בודק אם הקובץ החתום הוא בדיוק אותה תוכנה כמו המקורי — רק עם חתימה שנוספה, בלי שום שינוי בקוד" Foreground="{StaticResource Muted}" FontSize="13" HorizontalAlignment="Center" TextAlignment="Center" MaxWidth="460" TextWrapping="Wrap"/>
+            </StackPanel>
+
+            <Grid Name="CmpResult" Visibility="Collapsed">
+              <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+              </Grid.RowDefinitions>
+              <Border Padding="22,20" BorderBrush="{StaticResource Stroke}" BorderThickness="0,0,0,1">
+                <StackPanel Orientation="Horizontal">
+                  <Border Name="CmpIconBg" Width="52" Height="52" CornerRadius="14" VerticalAlignment="Top">
+                    <TextBlock Name="CmpIcon" Style="{StaticResource Icon}" FontSize="24"/>
+                  </Border>
+                  <StackPanel Margin="16,0,0,0" VerticalAlignment="Center" MaxWidth="720">
+                    <TextBlock Name="CmpHeadline" Foreground="{StaticResource Fg}" FontSize="18" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                    <TextBlock Name="CmpSub" Foreground="{StaticResource Muted}" FontSize="13" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                  </StackPanel>
+                </StackPanel>
+              </Border>
+              <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <StackPanel Name="CmpRows" Margin="22,6,22,14"/>
+              </ScrollViewer>
+            </Grid>
+          </Grid>
+        </Border>
+      </Grid>
+      </Grid>
     </Grid>
   </Border>
 </Window>
@@ -605,7 +688,7 @@ function Show-Banner([string]$kind, [string]$text) {
     $ui.Banner.Visibility = 'Visible'
 }
 
-function Add-Row([string]$key, [string]$value, [string]$level = 'info', [switch]$Ltr) {
+function Add-Row([string]$key, [string]$value, [string]$level = 'info', [switch]$Ltr, $Container) {
     $g = New-Object Windows.Controls.Grid
     foreach ($w in '22', '160', '*') {
         $cd = New-Object Windows.Controls.ColumnDefinition
@@ -631,7 +714,8 @@ function Add-Row([string]$key, [string]$value, [string]$level = 'info', [switch]
     [void]$g.Children.Add($dot); [void]$g.Children.Add($k); [void]$g.Children.Add($v)
     $b = New-Object Windows.Controls.Border
     $b.Padding = '0,11'; $b.BorderBrush = Get-Brush '#22284A'; $b.BorderThickness = '0,0,0,1'; $b.Child = $g
-    [void]$ui.Rows.Children.Add($b)
+    if (-not $Container) { $Container = $ui.Rows }
+    [void]$Container.Children.Add($b)
 }
 
 function Set-Status([string]$level, [char]$glyph, [string]$text) {
@@ -910,6 +994,102 @@ function Set-DropHover([bool]$on) {
     else { $ui.DropDash.Stroke = Get-Brush '#39416E'; $ui.DropZone.Background = Get-Brush '#161A2E' }
 }
 
+# --- compare / cross-check mode ---------------------------------------------
+$script:CmpSigned = $null
+$script:CmpUnsigned = $null
+
+function Set-AppMode([string]$mode) {
+    $compare = ($mode -eq 'compare')
+    $ui.SignPage.Visibility = if ($compare) { 'Collapsed' } else { 'Visible' }
+    $ui.ComparePage.Visibility = if ($compare) { 'Visible' } else { 'Collapsed' }
+}
+
+function Cmp-Slot($sender) { if ($sender.Name -eq 'DropSigned') { 'signed' } else { 'unsigned' } }
+
+function Set-CmpHover([string]$slot, [bool]$on) {
+    $dash = if ($slot -eq 'signed') { $ui.DashSigned } else { $ui.DashUnsigned }
+    $zone = if ($slot -eq 'signed') { $ui.DropSigned } else { $ui.DropUnsigned }
+    if ($on) { $dash.Stroke = Get-Brush '#6C8CFF'; $zone.Background = Get-Brush '#1A2045' }
+    else { $dash.Stroke = Get-Brush '#39416E'; $zone.Background = Get-Brush '#161A2E' }
+}
+
+function Set-CmpZone([string]$slot, [string]$path) {
+    $name = [IO.Path]::GetFileName($path)
+    $sig = Get-AuthenticodeSignature -LiteralPath $path
+    $isSigned = ($sig.SignerCertificate -and [string]$sig.SignatureType -eq 'Authenticode')
+    $sub = if ($sig.Status -eq 'Valid') { 'חתום ותקף' } elseif ($isSigned) { 'חתום (תעודה לא מאושרת)' } else { 'לא חתום' }
+    $col = if ($isSigned) { $Pal.ok } else { $Pal.muted }
+    if ($slot -eq 'signed') {
+        $ui.SignedName.Text = $name; $ui.SignedSub.Text = $sub
+        $ui.SignedIcon.Foreground = Get-Brush $col; $ui.SignedSub.Foreground = Get-Brush $col
+    } else {
+        $ui.UnsignedName.Text = $name; $ui.UnsignedSub.Text = $sub
+        $ui.UnsignedIcon.Foreground = Get-Brush $col; $ui.UnsignedSub.Foreground = Get-Brush $col
+    }
+}
+
+function Open-CompareFile([string]$slot, [string]$path) {
+    if (-not $path -or -not (Test-Path -LiteralPath $path)) { return }
+    $full = (Resolve-Path -LiteralPath $path).Path
+    if ($slot -eq 'signed') { $script:CmpSigned = $full } else { $script:CmpUnsigned = $full }
+    Set-CmpZone $slot $full
+    Write-Log ("Compare [$slot]: " + $full)
+    if ($script:CmpSigned -and $script:CmpUnsigned) { Show-Compare }
+}
+
+function Show-Compare {
+    try { $cc = Get-CrossCheck $script:CmpSigned $script:CmpUnsigned }
+    catch { Write-Log ("Compare ERROR: " + $_.Exception.Message); return }
+    $ui.CmpEmpty.Visibility = 'Collapsed'
+    $ui.CmpResult.Visibility = 'Visible'
+    $ui.CmpRows.Children.Clear()
+
+    $map = @{
+        'match-valid'     = @{ g = [char]0xE73E; h = 'הקבצים תואמים — אותה תוכנה, נוספה רק חתימה'; s = 'תוכן הקובץ החתום זהה למקורי, והחתימה תקפה ומאומתת במחשב הזה.' }
+        'match-untrusted' = @{ g = [char]0xE73E; h = 'התוכן תואם — החתימה נוספה בלי לשנות את התוכנה'; s = 'הקובץ החתום זהה למקורי בתוכן. התעודה לא מאומתת במחשב הזה, אבל זה לא מעיד על שינוי בקוד.' }
+        'mismatch'        = @{ g = [char]0xEA39; h = 'הקבצים שונים — התוכן לא תואם!'; s = 'הקובץ החתום אינו אותה תוכנה כמו המקורי. ייתכן שזו גרסה אחרת, או שהקובץ שונה אחרי הבנייה.' }
+        'nosigned'        = @{ g = [char]0xE7BA; h = 'אף אחד מהקבצים לא נושא חתימה מוטמעת'; s = 'להצלבה שים בצד אחד קובץ חתום ובצד השני את המקור הלא חתום.' }
+        'notpe'           = @{ g = [char]0xE783; h = 'אחד הקבצים אינו קובץ PE תקין'; s = 'ההצלבה עובדת על קובצי EXE או DLL.' }
+        'samefile'        = @{ g = [char]0xE7BA; h = 'זה אותו קובץ בשני הצדדים'; s = 'בחר שני קבצים שונים: החתום והמקורי.' }
+    }
+    $m = $map[$cc.Verdict]; if (-not $m) { $m = $map['mismatch'] }
+    $col = $Pal[$cc.Level]
+    $ui.CmpIconBg.Background = Get-Brush (Get-Tint $col '22')
+    $ui.CmpIcon.Foreground = Get-Brush $col
+    $ui.CmpIcon.Text = [string]$m.g
+    $ui.CmpHeadline.Foreground = Get-Brush $col
+    $ui.CmpHeadline.Text = $m.h
+    $ui.CmpSub.Text = $m.s
+
+    $S = $cc.Signed; $U = $cc.Unsigned
+    Add-Row 'קובץ חתום' ([IO.Path]::GetFileName($S.Path)) 'info' -Container $ui.CmpRows
+    Add-Row 'קובץ מקורי' ([IO.Path]::GetFileName($U.Path)) 'info' -Container $ui.CmpRows
+    $sigTxt = switch ($S.SigStatus) {
+        'Valid' { 'חתום ותקף' }
+        'UnknownError' { if ($S.Signer) { 'חתום, תעודה לא מאושרת במחשב הזה' } else { $S.SigMessage } }
+        'NotSigned' { 'לא חתום' }
+        default { $S.SigStatus }
+    }
+    $sigLvl = if ($S.SigStatus -eq 'Valid') { 'ok' } elseif ($S.Signer) { 'warn' } else { 'bad' }
+    Add-Row 'חתימת הקובץ החתום' $sigTxt $sigLvl -Container $ui.CmpRows
+    if ($S.Signer) { Add-Row 'חותם' $S.Signer 'info' -Ltr -Container $ui.CmpRows }
+
+    if ($cc.BothArePe) {
+        $mLvl = if ($cc.CodeMatches) { 'ok' } else { 'bad' }
+        $mTxt = if ($cc.CodeMatches) { 'תואם — התוכן זהה בדיוק' } else { 'לא תואם — התוכן שונה' }
+        Add-Row 'התאמת תוכן (ללא החתימה)' $mTxt $mLvl -Container $ui.CmpRows
+        Add-Row 'Hash תוכן · חתום' $cc.SignedNormHash $mLvl -Ltr -Container $ui.CmpRows
+        Add-Row 'Hash תוכן · מקורי' $cc.UnsignedNormHash $mLvl -Ltr -Container $ui.CmpRows
+        $diff = $S.SizeBytes - $U.SizeBytes
+        if ($diff -gt 0) { Add-Row 'הפרש גודל' ('{0:N0} bytes — גודל בלוק החתימה שנוסף' -f $diff) 'info' -Ltr -Container $ui.CmpRows }
+        elseif ($diff -ne 0) { Add-Row 'הפרש גודל' ('{0:N0} bytes' -f $diff) 'warn' -Ltr -Container $ui.CmpRows }
+    }
+    if (($S.FileVersion -or $U.FileVersion) -and ($S.FileVersion -ne $U.FileVersion)) {
+        Add-Row 'גרסה · חתום / מקורי' ((('' + $S.FileVersion), ('' + $U.FileVersion)) -join '  /  ') 'warn' -Ltr -Container $ui.CmpRows
+    }
+    if ($cc.UnsignedAlsoSigned) { Add-Row 'שים לב' 'גם הקובץ ה"מקורי" חתום. ההשוואה מתעלמת מהחתימות ובודקת רק את התוכן.' 'warn' -Container $ui.CmpRows }
+}
+
 # --- signing runs in a background runspace so the window stays responsive ---
 $timer = New-Object Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds(150)
@@ -978,10 +1158,12 @@ function Start-Sign {
 
 # --- events -----------------------------------------------------------------
 $onDragOver = { param($s, $e)
+    if ($ui.ComparePage.Visibility -eq 'Visible') { $e.Effects = 'None'; $e.Handled = $true; return }
     if ($e.Data.GetDataPresent([Windows.DataFormats]::FileDrop)) { $e.Effects = 'Copy'; Set-DropHover $true } else { $e.Effects = 'None' }
     $e.Handled = $true
 }
 $onDrop = { param($s, $e)
+    if ($ui.ComparePage.Visibility -eq 'Visible') { $e.Handled = $true; return }
     Set-DropHover $false
     $files = $e.Data.GetData([Windows.DataFormats]::FileDrop)
     if ($files) { Open-File $files[0] }
@@ -1013,6 +1195,33 @@ $ui.ChkTs.Add_Click({ Save-Settings })
 $ui.BtnSign.Add_Click({ Start-Sign })
 $ui.BtnLog.Add_Click({ $ui.LogPanel.Visibility = if ($ui.LogPanel.Visibility -eq 'Visible') { 'Collapsed' } else { 'Visible' } })
 $ui.BtnOpen.Add_Click({ if ($script:LastOutput) { Start-Process explorer.exe "/select,`"$($script:LastOutput)`"" } })
+
+$ui.TabSign.Add_Checked({ Set-AppMode 'sign' })
+$ui.TabCompare.Add_Checked({ Set-AppMode 'compare' })
+
+$cmpDragOver = { param($s, $e)
+    if ($e.Data.GetDataPresent([Windows.DataFormats]::FileDrop)) { $e.Effects = 'Copy'; Set-CmpHover (Cmp-Slot $s) $true } else { $e.Effects = 'None' }
+    $e.Handled = $true
+}
+$cmpDrop = { param($s, $e)
+    $slot = Cmp-Slot $s
+    Set-CmpHover $slot $false
+    $files = $e.Data.GetData([Windows.DataFormats]::FileDrop)
+    if ($files) { Open-CompareFile $slot $files[0] }
+    $e.Handled = $true
+}
+foreach ($z in $ui.DropSigned, $ui.DropUnsigned) {
+    $z.Add_DragOver($cmpDragOver)
+    $z.Add_Drop($cmpDrop)
+    $z.Add_DragLeave({ param($s, $e) Set-CmpHover (Cmp-Slot $s) $false })
+    $z.Add_MouseEnter({ param($s, $e) Set-CmpHover (Cmp-Slot $s) $true })
+    $z.Add_MouseLeave({ param($s, $e) Set-CmpHover (Cmp-Slot $s) $false })
+    $z.Add_MouseLeftButtonUp({ param($s, $e)
+        $dlg = New-Object Microsoft.Win32.OpenFileDialog
+        $dlg.Filter = 'קבצי הפעלה (*.exe;*.dll;*.msi;*.sys)|*.exe;*.dll;*.msi;*.sys|כל הקבצים (*.*)|*.*'
+        if ($dlg.ShowDialog($win)) { Open-CompareFile (Cmp-Slot $s) $dlg.FileName }
+    })
+}
 
 $ui.ModeAuto.Add_Checked({ Set-Mode 'auto'; Save-Settings })
 $ui.ModeExisting.Add_Checked({ Set-Mode 'existing'; Save-Settings })
@@ -1068,6 +1277,13 @@ if ($PfxPath) {
 Write-Log 'Ready. Drop an EXE to inspect it.'
 if ($ShowLog) { $ui.LogPanel.Visibility = 'Visible' }
 
+if ($CompareSigned -and $CompareUnsigned) {
+    $ui.TabCompare.IsChecked = $true
+    Set-AppMode 'compare'
+} else {
+    Set-AppMode 'sign'
+}
+
 if ($Screenshot) {
     $win.WindowStartupLocation = 'Manual'; $win.Left = -20000; $win.Top = 0; $win.ShowActivated = $false
 }
@@ -1075,6 +1291,10 @@ if ($Screenshot) {
 $win.Add_ContentRendered({
     if ($InitialFile) { Open-File $InitialFile }
     if ($InitialFile -and $AutoSign) { Start-Sign }
+    if ($CompareSigned -and $CompareUnsigned) {
+        Open-CompareFile 'signed' $CompareSigned
+        Open-CompareFile 'unsigned' $CompareUnsigned
+    }
     if ($Screenshot) {
         $script:ShotStarted = Get-Date
         $script:ShotTimer = New-Object Windows.Threading.DispatcherTimer

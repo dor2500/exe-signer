@@ -2,7 +2,7 @@
 
 # Exe Signer
 
-אפליקציית דסקטופ ל-Windows שבודקת קובצי EXE, DLL ו-MSI וחותמת עליהם בחתימה דיגיטלית (Authenticode). את תעודת החתימה היא יוצרת בעצמה.
+אפליקציית דסקטופ ל-Windows שבודקת קובצי EXE, DLL ו-MSI, חותמת עליהם בחתימה דיגיטלית (Authenticode), ומצליבה קובץ חתום מול המקור הלא-חתום כדי לוודא שלא שונה. את תעודת החתימה היא יוצרת בעצמה.
 
 ![הקובץ אחרי חתימה](docs/screenshot-signed.png)
 
@@ -68,6 +68,18 @@ irm https://raw.githubusercontent.com/dor2500/exe-signer/main/install.ps1 | iex
 
 ![חתימה עם קובץ PFX](docs/screenshot-existing.png)
 
+## הצלבה: קובץ חתום מול המקור
+בלשונית **"הצלבת חתום / מקורי"** שבראש החלון טוענים שני קבצים — את ה-EXE החתום ואת ה-EXE המקורי לפני החתימה — והכלי בודק אם מדובר **בדיוק באותה תוכנה**, רק עם חתימה שנוספה.
+
+![הצלבת קובץ חתום מול מקורי](docs/screenshot-compare.png)
+
+זה עובד כך: חתימה על EXE משנה רק שלושה דברים בקובץ — בלוק החתימה שנוסף בסוף, הרשומה שמצביעה עליו, ושדה ה-checksum. הכלי מחשב Hash של **תוכן הקובץ בלבד**, בלי שלושת החלקים האלה, לשני הקבצים. אם ה-Hash זהה — הקוד לא שונה, נוספה רק חתימה. אם הוא שונה — מדובר בגרסה אחרת או בקובץ שהשתנה.
+
+- **תואם** (ירוק): אותה תוכנה, והחתימה תקפה.
+- **לא תואם** (אדום): התוכן שונה — זהירות.
+
+סדר הטעינה לא משנה: הכלי מזהה לבד איזה קובץ חתום ואיזה לא.
+
 ## מגבלה חשובה
 תעודה עצמית **לא** מעלימה את אזהרת SmartScreen או "Unknown publisher" אצל משתמשים אחרים, אלא רק במחשבים שהתקינו את קובץ ה-`.cer`.
 כדי שהקובץ יהיה מהימן אצל כולם צריך תעודה מגורם מוכר (Azure Trusted Signing, או תעודת OV/EV מ-Sectigo, DigiCert או SSL.com). תעודה כזו טוענים דרך "תעודה קיימת".
@@ -94,6 +106,10 @@ Invoke-SignExe -InputPath .\app.exe -OutputPath .\app-signed.exe -Cert $crt
 # existing certificate from the Windows certificate store
 $cert = Get-StoreSigningCerts | Out-GridView -PassThru
 Invoke-SignExe -InputPath .\app.exe -OutputPath .\app-signed.exe -Cert $cert
+
+# cross-check a signed EXE against the original unsigned EXE
+$cc = Get-CrossCheck .\app-signed.exe .\app.exe
+"$($cc.Verdict)  codeMatches=$($cc.CodeMatches)"   # match-valid / match-untrusted / mismatch
 ```
 
 </div>

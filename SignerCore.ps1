@@ -345,6 +345,95 @@ function Get-ExeReport {
     }
 }
 
+function Get-PeNormalizedHash {
+    # SHA-256 of the PE "content": everything except the three parts signing changes -
+    # the optional-header checksum, the certificate-table data-directory entry, and the
+    # appended signature block. Two builds of the same program give the same value whether
+    # or not they are signed, so it tells code-identity apart from the signature.
+    param([string]$Path)
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 64) { return $null }
+    $ms = New-Object IO.MemoryStream (, $bytes)
+    $br = New-Object IO.BinaryReader $ms
+    try {
+        if ($br.ReadUInt16() -ne 0x5A4D) { return $null }      # MZ
+        $ms.Position = 0x3C
+        $peOff = $br.ReadInt32()
+        if ($peOff -le 0 -or $peOff + 24 -gt $bytes.Length) { return $null }
+        $ms.Position = $peOff
+        if ($br.ReadUInt32() -ne 0x00004550) { return $null }  # PE\0\0
+        $ms.Position += 16                                     # COFF header after Signature
+        $optStart = $ms.Position + 4                           # skip OptionalHeaderSize + Characteristics (2+2)
+        $ms.Position = $optStart
+        $magic = $br.ReadUInt16()
+        if ($magic -ne 0x10b -and $magic -ne 0x20b) { return $null }
+        $checksumOff = $optStart + 64
+        $ddStart = if ($magic -eq 0x20b) { $optStart + 112 } else { $optStart + 96 }
+        $certDirOff = $ddStart + 4 * 8                          # data directory index 4 = Certificate Table
+        if ($certDirOff + 8 -gt $bytes.Length) { return $null }
+        $ms.Position = $certDirOff
+        $certRva = $br.ReadUInt32()
+        $certSize = $br.ReadUInt32()
+    } finally { $ms.Dispose() }
+
+    $copy = New-Object byte[] $bytes.Length
+    [Array]::Copy($bytes, $copy, $bytes.Length)
+    for ($i = 0; $i -lt 4; $i++) { $copy[$checksumOff + $i] = 0 }   # zero checksum
+    for ($i = 0; $i -lt 8; $i++) { $copy[$certDirOff + $i] = 0 }    # zero cert-table dir entry
+
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        if ($certSize -gt 0 -and $certRva -gt 0 -and ($certRva + $certSize) -le $copy.Length) {
+            # hash the bytes before the signature block and any bytes after it
+            $null = $sha.TransformBlock($copy, 0, $certRva, $null, 0)
+            $tail = $copy.Length - ($certRva + $certSize)
+            if ($tail -gt 0) { $null = $sha.TransformBlock($copy, $certRva + $certSize, $tail, $null, 0) }
+            $null = $sha.TransformFinalBlock(@(), 0, 0)
+            $hash = $sha.Hash
+        } else {
+            $hash = $sha.ComputeHash($copy)
+        }
+    } finally { $sha.Dispose() }
+    return (($hash | ForEach-Object { $_.ToString('X2') }) -join '')
+}
+
+function Get-CrossCheck {
+    # Cross-check a signed EXE against the original unsigned EXE: are they the same program,
+    # with only a signature added? Order-independent - each file is classified by its own signature.
+    param([string]$PathA, [string]$PathB)
+    $ra = Get-ExeReport $PathA
+    $rb = Get-ExeReport $PathB
+    # the "signed" slot is whichever file actually carries an embedded signature
+    $aEmbedded = ($ra.Signer -and $ra.SigType -ne 'Catalog')
+    $bEmbedded = ($rb.Signer -and $rb.SigType -ne 'Catalog')
+    if ($bEmbedded -and -not $aEmbedded) { $signed = $rb; $unsigned = $ra }
+    else { $signed = $ra; $unsigned = $rb }
+
+    $hs = Get-PeNormalizedHash $signed.Path
+    $hu = Get-PeNormalizedHash $unsigned.Path
+    $bothPe = $signed.Pe.IsPe -and $unsigned.Pe.IsPe
+    $codeMatches = $bothPe -and $hs -and $hu -and ($hs -eq $hu)
+
+    $verdict = 'mismatch'; $level = 'bad'
+    if (-not $bothPe) { $verdict = 'notpe'; $level = 'bad' }
+    elseif ($signed.Path -eq $unsigned.Path) { $verdict = 'samefile'; $level = 'warn' }
+    elseif (-not ($signed.Signer -and $signed.SigType -ne 'Catalog')) { $verdict = 'nosigned'; $level = 'warn' }
+    elseif ($codeMatches) {
+        if ($signed.SigStatus -eq 'Valid') { $verdict = 'match-valid'; $level = 'ok' }
+        else { $verdict = 'match-untrusted'; $level = 'warn' }
+    }
+
+    [pscustomobject]@{
+        Signed = $signed; Unsigned = $unsigned
+        SignedNormHash = $hs; UnsignedNormHash = $hu
+        CodeMatches = $codeMatches
+        BothArePe = $bothPe
+        UnsignedAlsoSigned = ($unsigned.Signer -and $unsigned.SigType -ne 'Catalog')
+        Verdict = $verdict
+        Level = $level
+    }
+}
+
 function Invoke-SignExe {
     # Signs a copy of $InputPath at $OutputPath. The original file is never modified.
     param(
