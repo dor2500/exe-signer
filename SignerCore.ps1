@@ -48,6 +48,65 @@ function Get-OrCreateSignerCert {
     return New-SignerCert $PublisherName
 }
 
+$script:CodeSigningOid = '1.3.6.1.5.5.7.3.3'
+
+function Test-CanSignCode {
+    # True when the certificate has a private key and allows code signing
+    # (explicit Code Signing EKU, or no EKU extension at all = any purpose).
+    param($Cert)
+    if (-not $Cert -or -not $Cert.HasPrivateKey) { return $false }
+    $eku = $Cert.Extensions | Where-Object { $_ -is [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension] }
+    if (-not $eku) { return $true }
+    return [bool]($eku.EnhancedKeyUsages | Where-Object { $_.Value -eq $script:CodeSigningOid })
+}
+
+function Get-StoreSigningCerts {
+    # Code-signing certificates with a private key from the user and machine stores
+    # (includes certificates on USB tokens / smart cards that Windows exposes there).
+    $seen = @{}
+    foreach ($loc in 'Cert:\CurrentUser\My', 'Cert:\LocalMachine\My') {
+        Get-ChildItem $loc -ErrorAction SilentlyContinue | Where-Object {
+            $_.NotAfter -gt (Get-Date) -and $_.NotBefore -lt (Get-Date) -and (Test-CanSignCode $_)
+        } | ForEach-Object {
+            if (-not $seen.ContainsKey($_.Thumbprint)) { $seen[$_.Thumbprint] = $true; $_ }
+        }
+    }
+}
+
+function Import-PfxForSigning {
+    # Loads a .pfx/.p12 for this session only (nothing is installed into the certificate store).
+    param([string]$Path, [System.Security.SecureString]$Password)
+    $flags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::UserKeySet
+    $col = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2Collection
+    $col.Import($Path, (New-Object System.Net.NetworkCredential('', $Password)).Password, $flags)
+    $cert = $col | Where-Object { $_.HasPrivateKey } | Select-Object -First 1
+    if (-not $cert) { throw 'The file does not contain a private key.' }
+    if (-not (Test-CanSignCode $cert)) { throw 'This certificate is not allowed to sign code (no Code Signing usage).' }
+    if ($cert.NotAfter -lt (Get-Date)) { throw ('This certificate expired on ' + $cert.NotAfter.ToString('dd/MM/yyyy')) }
+    return $cert
+}
+
+function Get-CertDisplayName {
+    param($Cert)
+    $cn = if ($Cert.Subject -match 'CN=("[^"]+"|[^,]+)') { $Matches[1].Trim('"') } else { $Cert.Subject }
+    return $cn
+}
+
+function Get-CertIssuerName {
+    param($Cert)
+    if ($Cert.Issuer -eq $Cert.Subject) { return 'self-signed' }
+    if ($Cert.Issuer -match 'CN=("[^"]+"|[^,]+)') { return $Matches[1].Trim('"') }
+    return $Cert.Issuer
+}
+
+function Test-CertChainTrusted {
+    param($Cert)
+    $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+    $chain.ChainPolicy.RevocationMode = 'NoCheck'
+    $null = $chain.ChainPolicy.ApplicationPolicy.Add((New-Object System.Security.Cryptography.Oid $script:CodeSigningOid))
+    return $chain.Build($Cert)
+}
+
 function Test-CertTrustedLocally {
     param($Cert)
     if (-not $Cert) { return $false }

@@ -41,6 +41,7 @@ irm https://raw.githubusercontent.com/dor2500/exe-signer/main/install.ps1 | iex
 |---|---|
 | **בדיקה** | מבנה PE (32/64 ביט, GUI/Console, ‎.NET), גודל, SHA-256, מוצר, חברה וגרסה, חתימה קיימת ותקינותה, חותמת זמן, והאם הקובץ הורד מהאינטרנט |
 | **תעודה אוטומטית** | בחתימה הראשונה נוצרת תעודת Code Signing (RSA 3072, SHA-256, תקפה ל-5 שנים) ב-`Cert:\CurrentUser\My` |
+| **תעודה קיימת** | בחירה מתוך תעודות חתימת הקוד שבמחשב (כולל טוקן USB או כרטיס חכם שמופיעים ב-Windows), או טעינה של קובץ PFX/P12 עם סיסמה. קובץ PFX נטען לזמן הריצה בלבד ולא מותקן במחשב |
 | **חתימה** | נוצר עותק `שם-signed.exe` עם חותמת זמן (DigiCert, ואם הוא לא זמין Sectigo או GlobalSign). הקובץ המקורי לא משתנה, אלא אם בוחרים לחתום עליו |
 | **אמון מקומי** | "סמוך במחשב הזה" מוסיף את התעודה ל-Root ול-TrustedPublisher של המשתמש. Windows מבקש אישור |
 | **ייצוא** | קובץ `.cer` להתקנה במחשבים אחרים |
@@ -50,9 +51,18 @@ irm https://raw.githubusercontent.com/dor2500/exe-signer/main/install.ps1 | iex
   <img src="docs/screenshot-unsigned.png" width="49%" alt="דוח של קובץ לא חתום">
 </p>
 
+## חתימה עם תעודה קיימת
+בכרטיס "תעודת חתימה" עוברים ל"תעודה קיימת", ואז:
+- **תעודה מהמחשב:** בוחרים אותה מהרשימה. אם היא על טוקן USB, Windows יבקש את ה-PIN בזמן החתימה.
+- **קובץ PFX:** מקלידים את הסיסמה, לוחצים "בחר קובץ…" ובוחרים את הקובץ.
+
+מתחת לבחירה רואים אם התעודה מהימנה במחשב הזה ומי הנפיק אותה.
+
+![חתימה עם קובץ PFX](docs/screenshot-existing.png)
+
 ## מגבלה חשובה
 תעודה עצמית **לא** מעלימה את אזהרת SmartScreen או "Unknown publisher" אצל משתמשים אחרים, אלא רק במחשבים שהתקינו את קובץ ה-`.cer`.
-כדי שהקובץ יהיה מהימן אצל כולם צריך תעודה מגורם מוכר (Azure Trusted Signing, או תעודת OV/EV מ-Sectigo, DigiCert או SSL.com).
+כדי שהקובץ יהיה מהימן אצל כולם צריך תעודה מגורם מוכר (Azure Trusted Signing, או תעודת OV/EV מ-Sectigo, DigiCert או SSL.com). תעודה כזו טוענים דרך "תעודה קיימת".
 
 ## קבצים
 - `ExeSigner.cmd`: קובץ ההפעלה
@@ -64,6 +74,14 @@ irm https://raw.githubusercontent.com/dor2500/exe-signer/main/install.ps1 | iex
 $cert = Get-OrCreateSignerCert 'My Company'
 Invoke-SignExe -InputPath .\app.exe -OutputPath .\app-signed.exe -Cert $cert
 Get-ExeReport .\app-signed.exe
+
+# existing certificate from a PFX file
+$pfx = Import-PfxForSigning -Path .\my-cert.pfx -Password (Read-Host -AsSecureString 'PFX password')
+Invoke-SignExe -InputPath .\app.exe -OutputPath .\app-signed.exe -Cert $pfx
+
+# existing certificate from the Windows certificate store
+$cert = Get-StoreSigningCerts | Out-GridView -PassThru
+Invoke-SignExe -InputPath .\app.exe -OutputPath .\app-signed.exe -Cert $cert
 ```
 
 </div>

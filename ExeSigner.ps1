@@ -4,7 +4,9 @@ param(
     [string]$Screenshot,          # optional: render the window to this PNG and exit (used for README images)
     [switch]$ShowLog,
     [string]$Publisher,           # optional: override the saved publisher name
-    [switch]$AutoSign             # optional: sign InitialFile right away (used with -Screenshot for demos/tests)
+    [switch]$AutoSign,            # optional: sign InitialFile right away (used with -Screenshot for demos/tests)
+    [ValidateSet('', 'auto', 'existing')][string]$Mode,   # optional: certificate source
+    [string]$PfxPath              # optional: preload a PFX (password from $env:EXESIGNER_PFX_PASSWORD)
 )
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
@@ -14,21 +16,24 @@ $CorePath = Join-Path $PSScriptRoot 'SignerCore.ps1'
 
 # --- settings ---------------------------------------------------------------
 $settingsPath = Join-Path $env:APPDATA 'ExeSigner\settings.json'
-$settings = @{ Publisher = $env:USERNAME; Timestamp = $true }
+$settings = @{ Publisher = $env:USERNAME; Timestamp = $true; Mode = 'auto'; Thumbprint = $null }
 try {
     if (Test-Path $settingsPath) {
         $s = Get-Content $settingsPath -Raw | ConvertFrom-Json
         if ($s.Publisher) { $settings.Publisher = $s.Publisher }
         if ($null -ne $s.Timestamp) { $settings.Timestamp = [bool]$s.Timestamp }
+        if ($s.Mode -in 'auto', 'existing') { $settings.Mode = $s.Mode }
+        if ($s.Thumbprint) { $settings.Thumbprint = $s.Thumbprint }
     }
 } catch { }
 if ($Publisher) { $settings.Publisher = $Publisher }
+if ($Mode) { $settings.Mode = $Mode }
 
 # --- layout -----------------------------------------------------------------
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Exe Signer" Width="1140" Height="780" MinWidth="980" MinHeight="680"
+        Title="Exe Signer" Width="1140" Height="860" MinWidth="980" MinHeight="680"
         WindowStartupLocation="CenterScreen" WindowStyle="None" ResizeMode="CanResize"
         Background="#0E1120" FlowDirection="RightToLeft" AllowDrop="True"
         FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="14" UseLayoutRounding="True">
@@ -189,6 +194,70 @@ if ($Publisher) { $settings.Publisher = $Publisher }
       </Setter>
     </Style>
 
+    <Style x:Key="PwInput" TargetType="PasswordBox">
+      <Setter Property="Foreground" Value="{StaticResource Fg}"/>
+      <Setter Property="Background" Value="{StaticResource Bg}"/>
+      <Setter Property="BorderBrush" Value="{StaticResource Stroke}"/>
+      <Setter Property="CaretBrush" Value="{StaticResource Fg}"/>
+      <Setter Property="Padding" Value="10,9"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="PasswordBox">
+            <Border x:Name="b" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="1" CornerRadius="10" Padding="{TemplateBinding Padding}">
+              <ScrollViewer x:Name="PART_ContentHost"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="#5B8CFF"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="Seg" TargetType="RadioButton">
+      <Setter Property="Foreground" Value="{StaticResource Muted}"/>
+      <Setter Property="FontSize" Value="13"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="RadioButton">
+            <Border x:Name="b" CornerRadius="8" Padding="8,8" Background="Transparent">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter Property="Foreground" Value="#ECEEFB"/></Trigger>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="b" Property="Background" Value="#272E58"/>
+                <Setter Property="Foreground" Value="#ECEEFB"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="CertItem" TargetType="ListBoxItem">
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ListBoxItem">
+            <Border x:Name="b" CornerRadius="10" Padding="12,9" Margin="0,0,0,6" Background="{StaticResource Bg}"
+                    BorderBrush="{StaticResource Stroke}" BorderThickness="1">
+              <ContentPresenter/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="#39416E"/></Trigger>
+              <Trigger Property="IsSelected" Value="True">
+                <Setter TargetName="b" Property="BorderBrush" Value="#5B8CFF"/>
+                <Setter TargetName="b" Property="Background" Value="#1A2045"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
     <Style x:Key="Val" TargetType="TextBox">
       <Setter Property="Foreground" Value="{StaticResource Fg}"/>
       <Setter Property="Background" Value="Transparent"/>
@@ -335,11 +404,12 @@ if ($Publisher) { $settings.Publisher = $Publisher }
         <!-- side column -->
         <Grid Grid.Column="2">
           <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
           </Grid.RowDefinitions>
 
+          <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+          <StackPanel>
           <Border Style="{StaticResource Card}">
             <StackPanel>
               <StackPanel Orientation="Horizontal">
@@ -348,11 +418,51 @@ if ($Publisher) { $settings.Publisher = $Publisher }
                 </Border>
                 <StackPanel Margin="10,0,0,0" VerticalAlignment="Center">
                   <TextBlock Text="תעודת חתימה" Foreground="{StaticResource Fg}" FontSize="15" FontWeight="SemiBold"/>
-                  <TextBlock Text="נוצרת אוטומטית בחתימה הראשונה" Foreground="{StaticResource Muted}" FontSize="12"/>
+                  <TextBlock Name="CertSubtitle" Text="נוצרת אוטומטית בחתימה הראשונה" Foreground="{StaticResource Muted}" FontSize="12"/>
                 </StackPanel>
               </StackPanel>
-              <TextBlock Text="שם המפרסם" Foreground="{StaticResource Muted}" FontSize="12.5" Margin="0,18,0,6"/>
-              <TextBox Name="TxtPublisher" Style="{StaticResource Input}"/>
+
+              <Border Background="{StaticResource Bg}" CornerRadius="11" Padding="4" Margin="0,16,0,0">
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="*"/>
+                  </Grid.ColumnDefinitions>
+                  <RadioButton Name="ModeAuto" GroupName="CertMode" Style="{StaticResource Seg}" Content="תעודה אוטומטית" IsChecked="True"/>
+                  <RadioButton Name="ModeExisting" Grid.Column="1" GroupName="CertMode" Style="{StaticResource Seg}" Content="תעודה קיימת"/>
+                </Grid>
+              </Border>
+
+              <StackPanel Name="AutoPanel">
+                <TextBlock Text="שם המפרסם" Foreground="{StaticResource Muted}" FontSize="12.5" Margin="0,16,0,6"/>
+                <TextBox Name="TxtPublisher" Style="{StaticResource Input}"/>
+              </StackPanel>
+
+              <StackPanel Name="ExistingPanel" Visibility="Collapsed">
+                <TextBlock Text="תעודות חתימת קוד במחשב" Foreground="{StaticResource Muted}" FontSize="12.5" Margin="0,16,0,6"/>
+                <ListBox Name="CertList" MaxHeight="150" Background="Transparent" BorderThickness="0"
+                         ItemContainerStyle="{StaticResource CertItem}"
+                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
+                <TextBlock Name="CertListEmpty" Visibility="Collapsed" Foreground="{StaticResource Muted}" FontSize="12.5" TextWrapping="Wrap"
+                           Text="לא נמצאו במחשב תעודות לחתימת קוד. אפשר לטעון קובץ PFX."/>
+                <TextBlock Text="או טעינה מקובץ PFX / P12" Foreground="{StaticResource Muted}" FontSize="12.5" Margin="0,12,0,6"/>
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="10"/>
+                    <ColumnDefinition Width="Auto"/>
+                  </Grid.ColumnDefinitions>
+                  <PasswordBox Name="PfxPassword" Style="{StaticResource PwInput}" ToolTip="סיסמת קובץ ה-PFX (אם יש)"/>
+                  <Button Name="BtnPfx" Grid.Column="2" Style="{StaticResource Btn}">
+                    <StackPanel Orientation="Horizontal">
+                      <TextBlock Style="{StaticResource Icon}" Text="&#xE8E5;" FontSize="13" Margin="0,0,8,0"/>
+                      <TextBlock Text="בחר קובץ…"/>
+                    </StackPanel>
+                  </Button>
+                </Grid>
+                <TextBlock Text="קודם מקלידים סיסמה, ואז בוחרים את הקובץ. הקובץ לא מותקן במחשב." Foreground="{StaticResource Muted}" FontSize="11.5" Margin="0,6,0,0" TextWrapping="Wrap"/>
+              </StackPanel>
+
               <Border Margin="0,12,0,0" CornerRadius="11" Background="{StaticResource Bg}" Padding="14,11">
                 <StackPanel>
                   <StackPanel Orientation="Horizontal">
@@ -384,7 +494,7 @@ if ($Publisher) { $settings.Publisher = $Publisher }
             </StackPanel>
           </Border>
 
-          <Border Grid.Row="1" Style="{StaticResource Card}" Margin="0,18,0,0" VerticalAlignment="Top">
+          <Border Style="{StaticResource Card}" Margin="0,18,0,0" VerticalAlignment="Top">
             <StackPanel>
               <TextBlock Text="אפשרויות" Foreground="{StaticResource Fg}" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,14"/>
               <CheckBox Name="ChkTs" Style="{StaticResource Switch}">
@@ -402,8 +512,10 @@ if ($Publisher) { $settings.Publisher = $Publisher }
               </CheckBox>
             </StackPanel>
           </Border>
+          </StackPanel>
+          </ScrollViewer>
 
-          <StackPanel Grid.Row="2" Margin="0,18,0,0">
+          <StackPanel Grid.Row="1" Margin="0,18,0,0">
             <Border Name="Banner" Visibility="Collapsed" CornerRadius="12" Padding="14,11" Margin="0,0,0,12" BorderThickness="1">
               <StackPanel Orientation="Horizontal">
                 <TextBlock Name="BannerIcon" Style="{StaticResource Icon}" FontSize="15" VerticalAlignment="Top" Margin="0,2,10,0"/>
@@ -469,7 +581,14 @@ function Save-Settings {
     try {
         $dir = Split-Path $settingsPath
         if (-not (Test-Path $dir)) { New-Item -ItemType Directory $dir | Out-Null }
-        @{ Publisher = $ui.TxtPublisher.Text; Timestamp = [bool]$ui.ChkTs.IsChecked } | ConvertTo-Json | Set-Content $settingsPath -Encoding UTF8
+        if ($Screenshot) { return }   # demo/automation runs never touch the user's settings
+        $mode = if ($ui.ModeExisting.IsChecked) { 'existing' } else { 'auto' }
+        $thumb = $settings.Thumbprint
+        $sel = $ui.CertList.SelectedItem
+        if ($sel -and -not ($script:PfxCert -and $sel.Tag.Thumbprint -eq $script:PfxCert.Thumbprint)) { $thumb = $sel.Tag.Thumbprint }
+        $settings.Thumbprint = $thumb
+        @{ Publisher = $ui.TxtPublisher.Text; Timestamp = [bool]$ui.ChkTs.IsChecked; Mode = $mode; Thumbprint = $thumb } |
+            ConvertTo-Json | Set-Content $settingsPath -Encoding UTF8
     } catch { }
 }
 
@@ -591,13 +710,116 @@ function Show-Report([string]$path) {
     return $r
 }
 
+function Test-ExistingMode { return [bool]$ui.ModeExisting.IsChecked }
+
+function Get-SelectedCert {
+    if (Test-ExistingMode) {
+        if ($ui.CertList.SelectedItem) { return $ui.CertList.SelectedItem.Tag }
+        return $null
+    }
+    return (Get-SignerCert $ui.TxtPublisher.Text)
+}
+
+function Set-TrustButton([bool]$visible) {
+    # Trust is only offered for self-signed certificates; Export takes the full row otherwise.
+    $ui.BtnTrust.Visibility = if ($visible) { 'Visible' } else { 'Collapsed' }
+    if ($visible) { [Windows.Controls.Grid]::SetColumn($ui.BtnExport, 2); [Windows.Controls.Grid]::SetColumnSpan($ui.BtnExport, 1) }
+    else { [Windows.Controls.Grid]::SetColumn($ui.BtnExport, 0); [Windows.Controls.Grid]::SetColumnSpan($ui.BtnExport, 3) }
+}
+
+function Update-SignEnabled {
+    $ok = [bool]$script:CurrentFile -and -not $script:SignJob
+    if ($ok -and (Test-ExistingMode)) { $ok = [bool]$ui.CertList.SelectedItem }
+    $ui.BtnSign.IsEnabled = $ok
+}
+
+function New-CertListItem($cert, [bool]$fromPfx) {
+    $sp = New-Object Windows.Controls.StackPanel
+    $top = New-Object Windows.Controls.StackPanel
+    $top.Orientation = 'Horizontal'
+    $name = New-Object Windows.Controls.TextBlock
+    $name.Text = Get-CertDisplayName $cert
+    $name.Foreground = Get-Brush '#ECEEFB'; $name.FontSize = 13; $name.FontWeight = 'SemiBold'
+    $name.TextTrimming = 'CharacterEllipsis'; $name.MaxWidth = 230
+    [void]$top.Children.Add($name)
+    if ($fromPfx) {
+        $tag = New-Object Windows.Controls.Border
+        $tag.Background = Get-Brush '#2A2F5C'; $tag.CornerRadius = '5'; $tag.Padding = '6,1'; $tag.Margin = '8,0,0,0'
+        $tt = New-Object Windows.Controls.TextBlock
+        $tt.Text = 'PFX'; $tt.FontSize = 10.5; $tt.Foreground = Get-Brush '#AFC0FF'
+        $tag.Child = $tt
+        [void]$top.Children.Add($tag)
+    }
+    $det = New-Object Windows.Controls.TextBlock
+    $det.Text = ('{0}  ·  עד {1:dd/MM/yyyy}' -f (Get-CertIssuerName $cert), $cert.NotAfter)
+    $det.Foreground = Get-Brush $Pal.muted; $det.FontSize = 11.5; $det.Margin = '0,2,0,0'
+    $det.TextTrimming = 'CharacterEllipsis'
+    [void]$sp.Children.Add($top); [void]$sp.Children.Add($det)
+    $item = New-Object Windows.Controls.ListBoxItem
+    $item.Content = $sp
+    $item.Tag = $cert
+    $item.Style = $win.FindResource('CertItem')
+    return $item
+}
+
+function Update-CertList([string]$selectThumb) {
+    $script:FillingList = $true
+    try {
+        $ui.CertList.Items.Clear()
+        $all = @()
+        if ($script:PfxCert) { $all += , @($script:PfxCert, $true) }
+        $store = if ($env:EXESIGNER_DEMO_HIDE_STORE) { @() } else { @(Get-StoreSigningCerts) }
+        foreach ($c in $store) {
+            if ($script:PfxCert -and $c.Thumbprint -eq $script:PfxCert.Thumbprint) { continue }
+            $all += , @($c, $false)
+        }
+        foreach ($pair in $all) { [void]$ui.CertList.Items.Add((New-CertListItem $pair[0] $pair[1])) }
+        $ui.CertListEmpty.Visibility = if ($all.Count) { 'Collapsed' } else { 'Visible' }
+        $ui.CertList.Visibility = if ($all.Count) { 'Visible' } else { 'Collapsed' }
+        $pick = $null
+        if ($selectThumb) { $pick = $ui.CertList.Items | Where-Object { $_.Tag.Thumbprint -eq $selectThumb } | Select-Object -First 1 }
+        if (-not $pick -and $ui.CertList.Items.Count) { $pick = $ui.CertList.Items[0] }
+        $ui.CertList.SelectedItem = $pick
+    } finally { $script:FillingList = $false }
+}
+
 function Update-Cert {
+    if (Test-ExistingMode) {
+        $ui.CertSubtitle.Text = 'מהמחשב, מטוקן USB או מקובץ PFX'
+        $c = Get-SelectedCert
+        if (-not $c) {
+            $ui.CertDot.Fill = Get-Brush $Pal.muted
+            $ui.CertTitle.Text = 'לא נבחרה תעודה'
+            $ui.CertDetail.Text = 'בחר תעודה מהרשימה או טען קובץ PFX.'
+            Set-TrustButton $false; $ui.BtnExport.IsEnabled = $false
+            Update-SignEnabled
+            return
+        }
+        $selfSigned = ($c.Issuer -eq $c.Subject)
+        if (Test-CertChainTrusted $c) {
+            $ui.CertDot.Fill = Get-Brush $Pal.ok
+            $ui.CertTitle.Text = if ($selfSigned) { 'מאושרת במחשב הזה' } else { 'מהימנה · הונפקה ע"י ' + (Get-CertIssuerName $c) }
+        } else {
+            $ui.CertDot.Fill = Get-Brush $Pal.warn
+            $ui.CertTitle.Text = if ($selfSigned) { 'תעודה עצמית, לא מאושרת במחשב הזה' } else { 'השרשרת לא מאומתת במחשב הזה' }
+        }
+        $ui.CertDetail.Text = ('{0}  ·  בתוקף עד {1:dd/MM/yyyy}  ·  {2}' -f (Get-CertDisplayName $c), $c.NotAfter, $c.Thumbprint.Substring(0, 12))
+        Set-TrustButton ($selfSigned -and -not (Test-CertTrustedLocally $c))
+        $ui.BtnTrust.IsEnabled = $true
+        $ui.BtnExport.IsEnabled = $true
+        Update-SignEnabled
+        return
+    }
+
+    $ui.CertSubtitle.Text = 'נוצרת אוטומטית בחתימה הראשונה'
+    Set-TrustButton $true
     $c = Get-SignerCert $ui.TxtPublisher.Text
     if (-not $c) {
         $ui.CertDot.Fill = Get-Brush $Pal.muted
         $ui.CertTitle.Text = 'עדיין אין תעודה'
         $ui.CertDetail.Text = 'היא תיווצר אוטומטית כשתחתום על הקובץ הראשון.'
         $ui.BtnTrust.IsEnabled = $false; $ui.BtnExport.IsEnabled = $false
+        Update-SignEnabled
         return
     }
     $trusted = Test-CertTrustedLocally $c
@@ -606,6 +828,37 @@ function Update-Cert {
     $ui.CertDetail.Text = ('בתוקף עד {0:dd/MM/yyyy}  ·  {1}' -f $c.NotAfter, $c.Thumbprint.Substring(0, 12))
     $ui.BtnTrust.IsEnabled = -not $trusted
     $ui.BtnExport.IsEnabled = $true
+    Update-SignEnabled
+}
+
+function Set-Mode([string]$mode) {
+    $existing = ($mode -eq 'existing')
+    $ui.ModeExisting.IsChecked = $existing
+    $ui.ModeAuto.IsChecked = -not $existing
+    $ui.AutoPanel.Visibility = if ($existing) { 'Collapsed' } else { 'Visible' }
+    $ui.ExistingPanel.Visibility = if ($existing) { 'Visible' } else { 'Collapsed' }
+    if ($existing -and $ui.CertList.Items.Count -eq 0) { Update-CertList $settings.Thumbprint }
+    Update-Cert
+}
+
+function Import-PfxFromUi([string]$path, [System.Security.SecureString]$password) {
+    try {
+        $cert = Import-PfxForSigning -Path $path -Password $password
+        $script:PfxCert = $cert
+        Update-CertList $cert.Thumbprint
+        Update-Cert
+        Write-Log ("Loaded PFX: " + $cert.Subject + " (" + $cert.Thumbprint + ")")
+        Show-Banner 'ok' ('התעודה נטענה: ' + (Get-CertDisplayName $cert))
+    } catch {
+        $ex = $_.Exception
+        while ($ex.InnerException) { $ex = $ex.InnerException }
+        Write-Log ("PFX ERROR: " + $ex.Message)
+        if ($ex -is [System.Security.Cryptography.CryptographicException]) {
+            Show-Banner 'bad' 'לא הצלחתי לפתוח את הקובץ. כנראה שהסיסמה שגויה: הקלד אותה ובחר את הקובץ שוב.'
+        } else {
+            Show-Banner 'bad' ('טעינת התעודה נכשלה: ' + $ex.Message)
+        }
+    }
 }
 
 function Open-File([string]$path) {
@@ -616,14 +869,15 @@ function Open-File([string]$path) {
     Show-Banner $null
     Write-Log ("Loaded " + $script:CurrentFile)
     $r = Show-Report $script:CurrentFile
-    $ui.BtnSign.IsEnabled = [bool]$r
+    if (-not $r) { $script:CurrentFile = $null }
+    Update-SignEnabled
     if ($r -and $r.Signer -and $r.SigStatus -eq 'Valid' -and $r.SigType -ne 'Catalog') {
         Show-Banner 'warn' 'לקובץ כבר יש חתימה תקפה. חתימה חדשה תחליף אותה.'
     }
 }
 
 function Set-Busy([bool]$busy) {
-    $ui.BtnSign.IsEnabled = -not $busy
+    if ($busy) { $ui.BtnSign.IsEnabled = $false } else { Update-SignEnabled }
     $ui.Progress.Visibility = if ($busy) { 'Visible' } else { 'Hidden' }
     $ui.SignText.Text = if ($busy) { 'חותם על הקובץ…' } else { 'חתום על הקובץ' }
     $win.Cursor = if ($busy) { [Windows.Input.Cursors]::AppStarting } else { $null }
@@ -669,6 +923,12 @@ function Start-Sign {
     if (-not $script:CurrentFile -or $script:SignJob) { return }
     $pub = $ui.TxtPublisher.Text.Trim()
     if (-not $pub) { $pub = $env:USERNAME; $ui.TxtPublisher.Text = $pub }
+    $useCert = $null
+    if (Test-ExistingMode) {
+        $useCert = Get-SelectedCert
+        if (-not $useCert) { Show-Banner 'warn' 'בחר תעודה קיימת או טען קובץ PFX.'; return }
+        Write-Log ("Using existing certificate: " + $useCert.Subject + " (" + $useCert.Thumbprint + ")")
+    }
     Save-Settings
     if ($ui.ChkOverwrite.IsChecked) { $out = $script:CurrentFile }
     else {
@@ -679,9 +939,9 @@ function Start-Sign {
     Set-Busy $true
     $ps = [powershell]::Create()
     [void]$ps.AddScript({
-        param($core, $in, $out, $pub, $ts, $q)
+        param($core, $in, $out, $pub, $ts, $q, $existing)
         . $core
-        $cert = Get-SignerCert $pub
+        $cert = if ($existing) { $existing } else { Get-SignerCert $pub }
         if (-not $cert) {
             $q.Enqueue("Creating a new code-signing certificate for '$pub' ...")
             $cert = New-SignerCert $pub
@@ -689,7 +949,7 @@ function Start-Sign {
         }
         $null = Invoke-SignExe -InputPath $in -OutputPath $out -Cert $cert -UseTimestamp $ts -Log { param($msg) $q.Enqueue($msg) }
     })
-    foreach ($a in @($CorePath, $script:CurrentFile, $out, $pub, [bool]$ui.ChkTs.IsChecked, $script:LogQueue)) { [void]$ps.AddArgument($a) }
+    foreach ($a in @($CorePath, $script:CurrentFile, $out, $pub, [bool]$ui.ChkTs.IsChecked, $script:LogQueue, $useCert)) { [void]$ps.AddArgument($a) }
     $script:SignJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Out = $out }
     $timer.Start()
 }
@@ -732,8 +992,20 @@ $ui.BtnSign.Add_Click({ Start-Sign })
 $ui.BtnLog.Add_Click({ $ui.LogPanel.Visibility = if ($ui.LogPanel.Visibility -eq 'Visible') { 'Collapsed' } else { 'Visible' } })
 $ui.BtnOpen.Add_Click({ if ($script:LastOutput) { Start-Process explorer.exe "/select,`"$($script:LastOutput)`"" } })
 
+$ui.ModeAuto.Add_Checked({ Set-Mode 'auto'; Save-Settings })
+$ui.ModeExisting.Add_Checked({ Set-Mode 'existing'; Save-Settings })
+$ui.CertList.Add_SelectionChanged({
+    if ($script:FillingList) { return }
+    Update-Cert; Save-Settings
+})
+$ui.BtnPfx.Add_Click({
+    $dlg = New-Object Microsoft.Win32.OpenFileDialog
+    $dlg.Filter = 'תעודה עם מפתח (*.pfx;*.p12)|*.pfx;*.p12|כל הקבצים (*.*)|*.*'
+    if ($dlg.ShowDialog($win)) { Import-PfxFromUi $dlg.FileName $ui.PfxPassword.SecurePassword }
+})
+
 $ui.BtnTrust.Add_Click({
-    $c = Get-SignerCert $ui.TxtPublisher.Text
+    $c = Get-SelectedCert
     if (-not $c) { return }
     try {
         if (Install-SignerTrust $c) { Write-Log 'Certificate is now trusted for this user on this PC.'; Show-Banner 'ok' 'התעודה מאושרת עכשיו במחשב הזה.' }
@@ -745,11 +1017,11 @@ $ui.BtnTrust.Add_Click({
 })
 
 $ui.BtnExport.Add_Click({
-    $c = Get-SignerCert $ui.TxtPublisher.Text
+    $c = Get-SelectedCert
     if (-not $c) { return }
     $dlg = New-Object Microsoft.Win32.SaveFileDialog
     $dlg.Filter = 'Certificate (*.cer)|*.cer'
-    $dlg.FileName = ($ui.TxtPublisher.Text.Trim() -replace '[\\/:*?"<>|]', '_') + '-codesign.cer'
+    $dlg.FileName = ((Get-CertDisplayName $c) -replace '[\\/:*?"<>|]', '_') + '-codesign.cer'
     if ($dlg.ShowDialog($win)) {
         Export-SignerCert $c $dlg.FileName
         Write-Log ("Exported public certificate to " + $dlg.FileName)
@@ -760,7 +1032,17 @@ $ui.BtnExport.Add_Click({
 # --- start ------------------------------------------------------------------
 $ui.TxtPublisher.Text = $settings.Publisher
 $ui.ChkTs.IsChecked = $settings.Timestamp
-Update-Cert
+$script:PfxCert = $null
+if ($PfxPath) {
+    # automation: password comes from the EXESIGNER_PFX_PASSWORD environment variable
+    $pw = New-Object System.Security.SecureString
+    if ($env:EXESIGNER_PFX_PASSWORD) { foreach ($ch in $env:EXESIGNER_PFX_PASSWORD.ToCharArray()) { $pw.AppendChar($ch) } }
+    $settings.Mode = 'existing'
+    Set-Mode 'existing'
+    Import-PfxFromUi $PfxPath $pw
+} else {
+    Set-Mode $settings.Mode
+}
 Write-Log 'Ready. Drop an EXE to inspect it.'
 if ($ShowLog) { $ui.LogPanel.Visibility = 'Visible' }
 
