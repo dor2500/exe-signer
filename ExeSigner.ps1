@@ -1,12 +1,18 @@
-﻿# ExeSigner.ps1 - desktop app: drop an EXE, inspect it, sign it with an auto-created code-signing certificate.
-param([string]$InitialFile)
+﻿# ExeSigner.ps1 - modern WPF desktop app: drop an EXE, inspect it, sign it with an auto-created certificate.
+param(
+    [string]$InitialFile,
+    [string]$Screenshot,          # optional: render the window to this PNG and exit (used for README images)
+    [switch]$ShowLog,
+    [string]$Publisher,           # optional: override the saved publisher name
+    [switch]$AutoSign             # optional: sign InitialFile right away (used with -Screenshot for demos/tests)
+)
 
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-[System.Windows.Forms.Application]::EnableVisualStyles()
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
-. (Join-Path $PSScriptRoot 'SignerCore.ps1')
+$CorePath = Join-Path $PSScriptRoot 'SignerCore.ps1'
+. $CorePath
 
+# --- settings ---------------------------------------------------------------
 $settingsPath = Join-Path $env:APPDATA 'ExeSigner\settings.json'
 $settings = @{ Publisher = $env:USERNAME; Timestamp = $true }
 try {
@@ -16,321 +22,783 @@ try {
         if ($null -ne $s.Timestamp) { $settings.Timestamp = [bool]$s.Timestamp }
     }
 } catch { }
+if ($Publisher) { $settings.Publisher = $Publisher }
+
+# --- layout -----------------------------------------------------------------
+[xml]$xaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Exe Signer" Width="1140" Height="780" MinWidth="980" MinHeight="680"
+        WindowStartupLocation="CenterScreen" WindowStyle="None" ResizeMode="CanResize"
+        Background="#0E1120" FlowDirection="RightToLeft" AllowDrop="True"
+        FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="14" UseLayoutRounding="True">
+  <WindowChrome.WindowChrome>
+    <WindowChrome CaptionHeight="52" ResizeBorderThickness="6" GlassFrameThickness="0" CornerRadius="0" UseAeroCaptionButtons="False"/>
+  </WindowChrome.WindowChrome>
+
+  <Window.Resources>
+    <SolidColorBrush x:Key="Bg" Color="#0E1120"/>
+    <SolidColorBrush x:Key="Surface" Color="#161A2E"/>
+    <SolidColorBrush x:Key="Surface2" Color="#1E2342"/>
+    <SolidColorBrush x:Key="Stroke" Color="#272D4F"/>
+    <SolidColorBrush x:Key="Fg" Color="#ECEEFB"/>
+    <SolidColorBrush x:Key="Muted" Color="#8A90B4"/>
+    <LinearGradientBrush x:Key="Accent" StartPoint="0,0" EndPoint="1,1">
+      <GradientStop Color="#5B8CFF" Offset="0"/>
+      <GradientStop Color="#9B5CFF" Offset="1"/>
+    </LinearGradientBrush>
+    <FontFamily x:Key="Icons">Segoe Fluent Icons, Segoe MDL2 Assets</FontFamily>
+
+    <Style x:Key="Card" TargetType="Border">
+      <Setter Property="Background" Value="{StaticResource Surface}"/>
+      <Setter Property="BorderBrush" Value="{StaticResource Stroke}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="16"/>
+      <Setter Property="Padding" Value="20"/>
+    </Style>
+
+    <Style x:Key="Icon" TargetType="TextBlock">
+      <Setter Property="FontFamily" Value="{StaticResource Icons}"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+      <Setter Property="HorizontalAlignment" Value="Center"/>
+    </Style>
+
+    <Style x:Key="Btn" TargetType="Button">
+      <Setter Property="Foreground" Value="{StaticResource Fg}"/>
+      <Setter Property="Background" Value="{StaticResource Surface2}"/>
+      <Setter Property="BorderBrush" Value="{StaticResource Stroke}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Padding" Value="12,10"/>
+      <Setter Property="FontSize" Value="13.5"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="b" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="11" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Opacity" Value="0.86"/></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="b" Property="Opacity" Value="0.7"/></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter TargetName="b" Property="Opacity" Value="0.38"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="BtnPrimary" TargetType="Button" BasedOn="{StaticResource Btn}">
+      <Setter Property="Background" Value="{StaticResource Accent}"/>
+      <Setter Property="Foreground" Value="White"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="FontSize" Value="16"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Padding" Value="18,15"/>
+    </Style>
+
+    <Style x:Key="BtnChrome" TargetType="Button">
+      <Setter Property="Foreground" Value="{StaticResource Muted}"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Width" Value="46"/>
+      <Setter Property="Height" Value="36"/>
+      <Setter Property="FontFamily" Value="{StaticResource Icons}"/>
+      <Setter Property="FontSize" Value="10"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="b" Background="{TemplateBinding Background}" CornerRadius="8">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="b" Property="Background" Value="#262C4E"/>
+                <Setter Property="Foreground" Value="#ECEEFB"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="BtnClose" TargetType="Button" BasedOn="{StaticResource BtnChrome}">
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="b" Background="Transparent" CornerRadius="8">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="b" Property="Background" Value="#E5484D"/>
+                <Setter Property="Foreground" Value="White"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="Switch" TargetType="CheckBox">
+      <Setter Property="Foreground" Value="{StaticResource Fg}"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="CheckBox">
+            <Grid Background="Transparent">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+              </Grid.ColumnDefinitions>
+              <ContentPresenter VerticalAlignment="Center"/>
+              <Border x:Name="track" Grid.Column="1" Width="42" Height="24" CornerRadius="12" Background="#2A3052"
+                      Margin="14,0,0,0" VerticalAlignment="Center">
+                <Ellipse x:Name="knob" Width="18" Height="18" Fill="#B9BEDD" HorizontalAlignment="Left" Margin="3,0"/>
+              </Border>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="track" Property="Background" Value="{StaticResource Accent}"/>
+                <Setter TargetName="knob" Property="HorizontalAlignment" Value="Right"/>
+                <Setter TargetName="knob" Property="Fill" Value="White"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="Input" TargetType="TextBox">
+      <Setter Property="Foreground" Value="{StaticResource Fg}"/>
+      <Setter Property="Background" Value="{StaticResource Bg}"/>
+      <Setter Property="BorderBrush" Value="{StaticResource Stroke}"/>
+      <Setter Property="CaretBrush" Value="{StaticResource Fg}"/>
+      <Setter Property="SelectionBrush" Value="#5B8CFF"/>
+      <Setter Property="Padding" Value="10,9"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="TextBox">
+            <Border x:Name="b" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="1" CornerRadius="10" Padding="{TemplateBinding Padding}">
+              <ScrollViewer x:Name="PART_ContentHost"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="#5B8CFF"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="Val" TargetType="TextBox">
+      <Setter Property="Foreground" Value="{StaticResource Fg}"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="IsReadOnly" Value="True"/>
+      <Setter Property="TextWrapping" Value="Wrap"/>
+      <Setter Property="SelectionBrush" Value="#5B8CFF"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="TextBox">
+            <ScrollViewer x:Name="PART_ContentHost" VerticalScrollBarVisibility="Disabled"/>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style TargetType="ScrollBar">
+      <Setter Property="Width" Value="8"/>
+      <Setter Property="MinWidth" Value="8"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ScrollBar">
+            <Track x:Name="PART_Track" IsDirectionReversed="True">
+              <Track.Thumb>
+                <Thumb>
+                  <Thumb.Template>
+                    <ControlTemplate TargetType="Thumb">
+                      <Border CornerRadius="4" Background="#343B66"/>
+                    </ControlTemplate>
+                  </Thumb.Template>
+                </Thumb>
+              </Track.Thumb>
+            </Track>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Window.Resources>
+
+  <Border Name="Root" Background="{StaticResource Bg}">
+    <Grid>
+      <Grid.RowDefinitions>
+        <RowDefinition Height="56"/>
+        <RowDefinition Height="*"/>
+      </Grid.RowDefinitions>
+
+      <!-- title bar -->
+      <Grid Margin="22,0,10,0">
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+          <Border Width="32" Height="32" CornerRadius="10" Background="{StaticResource Accent}">
+            <TextBlock Style="{StaticResource Icon}" Text="&#xEA18;" Foreground="White" FontSize="16"/>
+          </Border>
+          <TextBlock Text="Exe Signer" Foreground="{StaticResource Fg}" FontSize="16" FontWeight="SemiBold" Margin="12,0,0,0" VerticalAlignment="Center"/>
+          <Border Background="#1E2342" CornerRadius="6" Padding="8,2" Margin="12,0,0,0" VerticalAlignment="Center">
+            <TextBlock Text="בדיקה וחתימה דיגיטלית לקבצי הפעלה" Foreground="{StaticResource Muted}" FontSize="12.5"/>
+          </Border>
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" WindowChrome.IsHitTestVisibleInChrome="True">
+          <Button Name="BtnMin" Style="{StaticResource BtnChrome}" Content="&#xE921;"/>
+          <Button Name="BtnMax" Style="{StaticResource BtnChrome}" Content="&#xE922;"/>
+          <Button Name="BtnClose" Style="{StaticResource BtnClose}" Content="&#xE8BB;"/>
+        </StackPanel>
+      </Grid>
+
+      <Grid Grid.Row="1" Margin="22,4,22,22">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="20"/>
+          <ColumnDefinition Width="370"/>
+        </Grid.ColumnDefinitions>
+
+        <!-- main column -->
+        <Grid>
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+          </Grid.RowDefinitions>
+
+          <Border Name="DropZone" CornerRadius="16" Background="{StaticResource Surface}" Height="160" Cursor="Hand" AllowDrop="True">
+            <Grid>
+              <Rectangle Name="DropDash" RadiusX="16" RadiusY="16" Stroke="#39416E" StrokeThickness="1.6" StrokeDashArray="5 4"/>
+              <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+                <Border Width="56" Height="56" CornerRadius="28" Background="#232A52" HorizontalAlignment="Center">
+                  <TextBlock Name="DropIcon" Style="{StaticResource Icon}" Text="&#xE898;" FontSize="22" Foreground="#8FA8FF"/>
+                </Border>
+                <TextBlock Name="DropTitle" Text="גרור לכאן קובץ EXE, DLL או MSI" Foreground="{StaticResource Fg}" FontSize="18" FontWeight="SemiBold" Margin="0,14,0,3" HorizontalAlignment="Center"/>
+                <TextBlock Text="או לחץ כדי לבחור קובץ מהמחשב" Foreground="{StaticResource Muted}" FontSize="13" HorizontalAlignment="Center"/>
+              </StackPanel>
+            </Grid>
+          </Border>
+
+          <Border Grid.Row="1" Style="{StaticResource Card}" Margin="0,18,0,0" Padding="0">
+            <Grid>
+              <StackPanel Name="EmptyState" VerticalAlignment="Center" HorizontalAlignment="Center">
+                <TextBlock Style="{StaticResource Icon}" Text="&#xE8A5;" FontSize="40" Foreground="#39416E"/>
+                <TextBlock Text="עדיין לא נבחר קובץ" Foreground="{StaticResource Fg}" FontSize="16" FontWeight="SemiBold" Margin="0,14,0,4" HorizontalAlignment="Center"/>
+                <TextBlock Text="דוח הבדיקה יופיע כאן: מבנה הקובץ, גרסה, Hash וחתימה קיימת" Foreground="{StaticResource Muted}" FontSize="13" HorizontalAlignment="Center"/>
+              </StackPanel>
+
+              <Grid Name="ResultPanel" Visibility="Collapsed">
+                <Grid.RowDefinitions>
+                  <RowDefinition Height="Auto"/>
+                  <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <Border Padding="22,20" BorderBrush="{StaticResource Stroke}" BorderThickness="0,0,0,1">
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="Auto"/>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <Border Name="StatusIconBg" Width="52" Height="52" CornerRadius="14">
+                      <TextBlock Name="StatusIcon" Style="{StaticResource Icon}" FontSize="22"/>
+                    </Border>
+                    <StackPanel Grid.Column="1" Margin="16,0,16,0" VerticalAlignment="Center">
+                      <TextBlock Name="FileName" Foreground="{StaticResource Fg}" FontSize="19" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                      <TextBlock Name="FilePath" Foreground="{StaticResource Muted}" FontSize="12" Margin="0,3,0,0" TextTrimming="CharacterEllipsis" FlowDirection="LeftToRight" TextAlignment="Right"/>
+                    </StackPanel>
+                    <Border Grid.Column="2" Name="StatusChip" CornerRadius="15" Padding="14,6" VerticalAlignment="Center">
+                      <TextBlock Name="StatusText" FontSize="13" FontWeight="SemiBold"/>
+                    </Border>
+                  </Grid>
+                </Border>
+                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                  <StackPanel Name="Rows" Margin="22,6,22,14"/>
+                </ScrollViewer>
+              </Grid>
+
+              <Border Name="LogPanel" Visibility="Collapsed" VerticalAlignment="Bottom" Height="190" Margin="12"
+                      Background="#0B0E1A" BorderBrush="{StaticResource Stroke}" BorderThickness="1" CornerRadius="12" Padding="12,10">
+                <TextBox Name="LogBox" Style="{StaticResource Val}" FlowDirection="LeftToRight" FontFamily="Cascadia Mono, Consolas"
+                         FontSize="12" Foreground="#AEB4D8" TextWrapping="NoWrap">
+                  <TextBox.Template>
+                    <ControlTemplate TargetType="TextBox">
+                      <ScrollViewer x:Name="PART_ContentHost" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"/>
+                    </ControlTemplate>
+                  </TextBox.Template>
+                </TextBox>
+              </Border>
+            </Grid>
+          </Border>
+        </Grid>
+
+        <!-- side column -->
+        <Grid Grid.Column="2">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+
+          <Border Style="{StaticResource Card}">
+            <StackPanel>
+              <StackPanel Orientation="Horizontal">
+                <Border Width="30" Height="30" CornerRadius="9" Background="#232A52">
+                  <TextBlock Style="{StaticResource Icon}" Text="&#xEB95;" Foreground="#8FA8FF" FontSize="15"/>
+                </Border>
+                <StackPanel Margin="10,0,0,0" VerticalAlignment="Center">
+                  <TextBlock Text="תעודת חתימה" Foreground="{StaticResource Fg}" FontSize="15" FontWeight="SemiBold"/>
+                  <TextBlock Text="נוצרת אוטומטית בחתימה הראשונה" Foreground="{StaticResource Muted}" FontSize="12"/>
+                </StackPanel>
+              </StackPanel>
+              <TextBlock Text="שם המפרסם" Foreground="{StaticResource Muted}" FontSize="12.5" Margin="0,18,0,6"/>
+              <TextBox Name="TxtPublisher" Style="{StaticResource Input}"/>
+              <Border Margin="0,12,0,0" CornerRadius="11" Background="{StaticResource Bg}" Padding="14,11">
+                <StackPanel>
+                  <StackPanel Orientation="Horizontal">
+                    <Ellipse Name="CertDot" Width="8" Height="8" VerticalAlignment="Center"/>
+                    <TextBlock Name="CertTitle" Foreground="{StaticResource Fg}" FontSize="13" FontWeight="SemiBold" Margin="9,0,0,0"/>
+                  </StackPanel>
+                  <TextBlock Name="CertDetail" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="17,4,0,0"/>
+                </StackPanel>
+              </Border>
+              <Grid Margin="0,12,0,0">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="10"/>
+                  <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <Button Name="BtnTrust" Style="{StaticResource Btn}">
+                  <StackPanel Orientation="Horizontal">
+                    <TextBlock Style="{StaticResource Icon}" Text="&#xE72E;" FontSize="13" Margin="0,0,8,0"/>
+                    <TextBlock Text="סמוך במחשב הזה"/>
+                  </StackPanel>
+                </Button>
+                <Button Name="BtnExport" Grid.Column="2" Style="{StaticResource Btn}">
+                  <StackPanel Orientation="Horizontal">
+                    <TextBlock Style="{StaticResource Icon}" Text="&#xE896;" FontSize="13" Margin="0,0,8,0"/>
+                    <TextBlock Text="ייצוא ‎.cer"/>
+                  </StackPanel>
+                </Button>
+              </Grid>
+            </StackPanel>
+          </Border>
+
+          <Border Grid.Row="1" Style="{StaticResource Card}" Margin="0,18,0,0" VerticalAlignment="Top">
+            <StackPanel>
+              <TextBlock Text="אפשרויות" Foreground="{StaticResource Fg}" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,14"/>
+              <CheckBox Name="ChkTs" Style="{StaticResource Switch}">
+                <StackPanel>
+                  <TextBlock Text="חותמת זמן" Foreground="{StaticResource Fg}"/>
+                  <TextBlock Text="החתימה נשארת תקפה גם אחרי שהתעודה פגה" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap"/>
+                </StackPanel>
+              </CheckBox>
+              <Border Height="1" Background="{StaticResource Stroke}" Margin="0,14"/>
+              <CheckBox Name="ChkOverwrite" Style="{StaticResource Switch}">
+                <StackPanel>
+                  <TextBlock Text="חתום על הקובץ המקורי" Foreground="{StaticResource Fg}"/>
+                  <TextBlock Text="כבוי: נוצר עותק חדש עם הסיומת ‎-signed" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap"/>
+                </StackPanel>
+              </CheckBox>
+            </StackPanel>
+          </Border>
+
+          <StackPanel Grid.Row="2" Margin="0,18,0,0">
+            <Border Name="Banner" Visibility="Collapsed" CornerRadius="12" Padding="14,11" Margin="0,0,0,12" BorderThickness="1">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Name="BannerIcon" Style="{StaticResource Icon}" FontSize="15" VerticalAlignment="Top" Margin="0,2,10,0"/>
+                <TextBlock Name="BannerText" TextWrapping="Wrap" FontSize="13" MaxWidth="300"/>
+              </StackPanel>
+            </Border>
+            <Button Name="BtnSign" Style="{StaticResource BtnPrimary}" IsEnabled="False">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Style="{StaticResource Icon}" Text="&#xE70F;" FontSize="16" Margin="0,0,10,0"/>
+                <TextBlock Name="SignText" Text="חתום על הקובץ"/>
+              </StackPanel>
+            </Button>
+            <ProgressBar Name="Progress" IsIndeterminate="True" Height="3" Margin="6,8,6,0" Visibility="Hidden"
+                         Foreground="#8C7CFF" Background="Transparent" BorderThickness="0"/>
+            <Grid Margin="0,6,0,0">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="10"/>
+                <ColumnDefinition Width="*"/>
+              </Grid.ColumnDefinitions>
+              <Button Name="BtnOpen" Style="{StaticResource Btn}" IsEnabled="False">
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock Style="{StaticResource Icon}" Text="&#xE838;" FontSize="13" Margin="0,0,8,0"/>
+                  <TextBlock Text="פתח תיקייה"/>
+                </StackPanel>
+              </Button>
+              <Button Name="BtnLog" Grid.Column="2" Style="{StaticResource Btn}">
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock Style="{StaticResource Icon}" Text="&#xE9F9;" FontSize="13" Margin="0,0,8,0"/>
+                  <TextBlock Text="יומן פעולות"/>
+                </StackPanel>
+              </Button>
+            </Grid>
+          </StackPanel>
+        </Grid>
+      </Grid>
+    </Grid>
+  </Border>
+</Window>
+'@
+
+$win = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
+$ui = @{}
+foreach ($n in $xaml.SelectNodes('//*[@Name]')) { $ui[$n.GetAttribute('Name')] = $win.FindName($n.GetAttribute('Name')) }
+
+# --- helpers ----------------------------------------------------------------
+$bc = New-Object Windows.Media.BrushConverter
+function Get-Brush([string]$hex) { $bc.ConvertFromString($hex) }
+$Pal = @{ ok = '#3DDC97'; warn = '#FFB547'; bad = '#FF5C7A'; info = '#8FA8FF'; muted = '#8A90B4' }
+function Get-Tint([string]$hex, [string]$alpha = '24') { '#' + $alpha + $hex.TrimStart('#') }
+
+$script:CurrentFile = $null
+$script:LastOutput = $null
+$script:LogQueue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'
+$script:SignJob = $null
+
+function Write-Log([string]$m) {
+    $ui.LogBox.AppendText(("[{0:HH:mm:ss}] {1}`r`n" -f (Get-Date), $m))
+    $ui.LogBox.ScrollToEnd()
+}
+
 function Save-Settings {
     try {
         $dir = Split-Path $settingsPath
         if (-not (Test-Path $dir)) { New-Item -ItemType Directory $dir | Out-Null }
-        @{ Publisher = $txtPublisher.Text; Timestamp = $chkTs.Checked } | ConvertTo-Json | Set-Content $settingsPath -Encoding UTF8
+        @{ Publisher = $ui.TxtPublisher.Text; Timestamp = [bool]$ui.ChkTs.IsChecked } | ConvertTo-Json | Set-Content $settingsPath -Encoding UTF8
     } catch { }
 }
 
-$font = New-Object System.Drawing.Font('Segoe UI', 10)
-$fontBold = New-Object System.Drawing.Font('Segoe UI', 11, [System.Drawing.FontStyle]::Bold)
-
-$form = New-Object System.Windows.Forms.Form
-$form.Text = 'Exe Signer - בדיקה וחתימה דיגיטלית לקבצי EXE'
-$form.Size = New-Object System.Drawing.Size(900, 760)
-$form.MinimumSize = New-Object System.Drawing.Size(760, 640)
-$form.StartPosition = 'CenterScreen'
-$form.RightToLeft = 'Yes'
-$form.RightToLeftLayout = $true
-$form.Font = $font
-$form.AllowDrop = $true
-$form.BackColor = [System.Drawing.Color]::FromArgb(245, 247, 250)
-
-# --- drop zone --------------------------------------------------------------
-$drop = New-Object System.Windows.Forms.Label
-$drop.Text = "גרור לכאן קובץ EXE / DLL / MSI`nאו לחץ כאן כדי לבחור קובץ"
-$drop.TextAlign = 'MiddleCenter'
-$drop.Font = $fontBold
-$drop.BorderStyle = 'FixedSingle'
-$drop.BackColor = [System.Drawing.Color]::White
-$drop.ForeColor = [System.Drawing.Color]::FromArgb(40, 70, 140)
-$drop.Cursor = 'Hand'
-$drop.Location = New-Object System.Drawing.Point(12, 12)
-$drop.Size = New-Object System.Drawing.Size(860, 80)
-$drop.Anchor = 'Top, Left, Right'
-$drop.AllowDrop = $true
-$form.Controls.Add($drop)
-
-# --- report -----------------------------------------------------------------
-$lv = New-Object System.Windows.Forms.ListView
-$lv.View = 'Details'
-$lv.FullRowSelect = $true
-$lv.GridLines = $true
-$lv.HeaderStyle = 'Nonclickable'
-$lv.Location = New-Object System.Drawing.Point(12, 102)
-$lv.Size = New-Object System.Drawing.Size(860, 300)
-$lv.Anchor = 'Top, Left, Right, Bottom'
-$lv.RightToLeftLayout = $true
-[void]$lv.Columns.Add('בדיקה', 200)
-[void]$lv.Columns.Add('תוצאה', 640)
-$form.Controls.Add($lv)
-
-# --- certificate box --------------------------------------------------------
-$grp = New-Object System.Windows.Forms.GroupBox
-$grp.Text = 'תעודת חתימה (נוצרת אוטומטית)'
-$grp.Location = New-Object System.Drawing.Point(12, 410)
-$grp.Size = New-Object System.Drawing.Size(860, 120)
-$grp.Anchor = 'Bottom, Left, Right'
-$form.Controls.Add($grp)
-
-$lblPub = New-Object System.Windows.Forms.Label
-$lblPub.Text = 'שם המפרסם:'
-$lblPub.Location = New-Object System.Drawing.Point(10, 28)
-$lblPub.AutoSize = $true
-$grp.Controls.Add($lblPub)
-
-$txtPublisher = New-Object System.Windows.Forms.TextBox
-$txtPublisher.Text = $settings.Publisher
-$txtPublisher.Location = New-Object System.Drawing.Point(110, 25)
-$txtPublisher.Size = New-Object System.Drawing.Size(260, 25)
-$txtPublisher.RightToLeft = 'No'
-$grp.Controls.Add($txtPublisher)
-
-$chkTs = New-Object System.Windows.Forms.CheckBox
-$chkTs.Text = 'הוסף חותמת זמן (החתימה תישאר תקפה גם אחרי שהתעודה פגה)'
-$chkTs.Checked = $settings.Timestamp
-$chkTs.Location = New-Object System.Drawing.Point(390, 26)
-$chkTs.AutoSize = $true
-$grp.Controls.Add($chkTs)
-
-$lblCert = New-Object System.Windows.Forms.Label
-$lblCert.Location = New-Object System.Drawing.Point(10, 58)
-$lblCert.Size = New-Object System.Drawing.Size(840, 22)
-$grp.Controls.Add($lblCert)
-
-$btnTrust = New-Object System.Windows.Forms.Button
-$btnTrust.Text = 'סמוך על התעודה במחשב הזה'
-$btnTrust.Location = New-Object System.Drawing.Point(10, 84)
-$btnTrust.Size = New-Object System.Drawing.Size(230, 28)
-$grp.Controls.Add($btnTrust)
-
-$btnExport = New-Object System.Windows.Forms.Button
-$btnExport.Text = 'ייצא תעודה (.cer) למחשבים אחרים'
-$btnExport.Location = New-Object System.Drawing.Point(250, 84)
-$btnExport.Size = New-Object System.Drawing.Size(260, 28)
-$grp.Controls.Add($btnExport)
-
-# --- actions ----------------------------------------------------------------
-$btnSign = New-Object System.Windows.Forms.Button
-$btnSign.Text = 'חתום על הקובץ'
-$btnSign.Font = $fontBold
-$btnSign.BackColor = [System.Drawing.Color]::FromArgb(40, 110, 220)
-$btnSign.ForeColor = [System.Drawing.Color]::White
-$btnSign.FlatStyle = 'Flat'
-$btnSign.Location = New-Object System.Drawing.Point(12, 538)
-$btnSign.Size = New-Object System.Drawing.Size(200, 40)
-$btnSign.Anchor = 'Bottom, Left'
-$btnSign.Enabled = $false
-$form.Controls.Add($btnSign)
-
-$chkOverwrite = New-Object System.Windows.Forms.CheckBox
-$chkOverwrite.Text = 'חתום על הקובץ המקורי (במקום ליצור עותק -signed)'
-$chkOverwrite.Location = New-Object System.Drawing.Point(222, 548)
-$chkOverwrite.AutoSize = $true
-$chkOverwrite.Anchor = 'Bottom, Left'
-$form.Controls.Add($chkOverwrite)
-
-$btnOpen = New-Object System.Windows.Forms.Button
-$btnOpen.Text = 'פתח תיקייה'
-$btnOpen.Location = New-Object System.Drawing.Point(752, 538)
-$btnOpen.Size = New-Object System.Drawing.Size(120, 40)
-$btnOpen.Anchor = 'Bottom, Right'
-$btnOpen.Enabled = $false
-$form.Controls.Add($btnOpen)
-
-$log = New-Object System.Windows.Forms.TextBox
-$log.Multiline = $true
-$log.ReadOnly = $true
-$log.ScrollBars = 'Vertical'
-$log.RightToLeft = 'No'
-$log.Font = New-Object System.Drawing.Font('Consolas', 9)
-$log.Location = New-Object System.Drawing.Point(12, 586)
-$log.Size = New-Object System.Drawing.Size(860, 125)
-$log.Anchor = 'Bottom, Left, Right'
-$form.Controls.Add($log)
-
-# --- state & helpers --------------------------------------------------------
-$script:CurrentFile = $null
-$script:LastOutput = $null
-
-function Write-Log([string]$m) {
-    $log.AppendText(("[{0:HH:mm:ss}] {1}`r`n" -f (Get-Date), $m))
-    [System.Windows.Forms.Application]::DoEvents()
+function Show-Banner([string]$kind, [string]$text) {
+    if (-not $kind) { $ui.Banner.Visibility = 'Collapsed'; return }
+    $col = $Pal[$kind]
+    $ui.Banner.Background = Get-Brush (Get-Tint $col '1F')
+    $ui.Banner.BorderBrush = Get-Brush (Get-Tint $col '55')
+    $ui.BannerIcon.Foreground = Get-Brush $col
+    $ui.BannerIcon.Text = switch ($kind) { 'ok' { [char]0xE73E } 'bad' { [char]0xE783 } default { [char]0xE7BA } }
+    $ui.BannerText.Foreground = Get-Brush '#ECEEFB'
+    $ui.BannerText.Text = $text
+    $ui.Banner.Visibility = 'Visible'
 }
 
-function Add-Row([string]$k, [string]$v, [string]$level = 'info') {
-    $it = New-Object System.Windows.Forms.ListViewItem $k
-    [void]$it.SubItems.Add($v)
-    switch ($level) {
-        'ok'   { $it.ForeColor = [System.Drawing.Color]::FromArgb(20, 130, 50) }
-        'warn' { $it.ForeColor = [System.Drawing.Color]::FromArgb(190, 110, 0) }
-        'bad'  { $it.ForeColor = [System.Drawing.Color]::FromArgb(190, 30, 30) }
+function Add-Row([string]$key, [string]$value, [string]$level = 'info', [switch]$Ltr) {
+    $g = New-Object Windows.Controls.Grid
+    foreach ($w in '22', '160', '*') {
+        $cd = New-Object Windows.Controls.ColumnDefinition
+        $cd.Width = (New-Object Windows.GridLengthConverter).ConvertFromString($w)
+        $g.ColumnDefinitions.Add($cd)
     }
-    [void]$lv.Items.Add($it)
+    $dot = New-Object Windows.Shapes.Ellipse
+    $dot.Width = 7; $dot.Height = 7; $dot.VerticalAlignment = 'Top'; $dot.Margin = '0,7,0,0'; $dot.HorizontalAlignment = 'Left'
+    $dot.Fill = Get-Brush $Pal[$level]
+    $k = New-Object Windows.Controls.TextBlock
+    $k.Text = $key; $k.Foreground = Get-Brush $Pal.muted; $k.FontSize = 13; $k.Margin = '0,1,0,0'
+    [Windows.Controls.Grid]::SetColumn($k, 1)
+    $v = New-Object Windows.Controls.TextBox
+    $v.Style = $win.FindResource('Val')
+    $v.Text = $value
+    $v.FontSize = 13.5
+    if ($level -eq 'warn' -or $level -eq 'bad') { $v.Foreground = Get-Brush $Pal[$level] }
+    if ($Ltr) {
+        $v.FlowDirection = 'LeftToRight'; $v.TextAlignment = 'Right'
+        $v.FontFamily = New-Object Windows.Media.FontFamily 'Cascadia Mono, Consolas'; $v.FontSize = 12
+    }
+    [Windows.Controls.Grid]::SetColumn($v, 2)
+    [void]$g.Children.Add($dot); [void]$g.Children.Add($k); [void]$g.Children.Add($v)
+    $b = New-Object Windows.Controls.Border
+    $b.Padding = '0,11'; $b.BorderBrush = Get-Brush '#22284A'; $b.BorderThickness = '0,0,0,1'; $b.Child = $g
+    [void]$ui.Rows.Children.Add($b)
 }
 
-function Update-CertLabel {
-    $c = Get-SignerCert $txtPublisher.Text
-    if (-not $c) {
-        $lblCert.Text = 'עדיין אין תעודה לשם הזה - היא תיווצר אוטומטית בחתימה הראשונה.'
-        $lblCert.ForeColor = [System.Drawing.Color]::DimGray
-        $btnExport.Enabled = $false; $btnTrust.Enabled = $false
-        return
-    }
-    $trusted = Test-CertTrustedLocally $c
-    $t = if ($trusted) { 'מאושרת במחשב הזה' } else { 'לא מאושרת עדיין במחשב הזה' }
-    $lblCert.Text = ('תעודה: {0}  |  בתוקף עד {1:dd/MM/yyyy}  |  {2}  |  {3}' -f $c.Subject, $c.NotAfter, $c.Thumbprint.Substring(0, 12), $t)
-    $lblCert.ForeColor = if ($trusted) { [System.Drawing.Color]::FromArgb(20, 130, 50) } else { [System.Drawing.Color]::FromArgb(190, 110, 0) }
-    $btnExport.Enabled = $true
-    $btnTrust.Enabled = -not $trusted
+function Set-Status([string]$level, [char]$glyph, [string]$text) {
+    $col = $Pal[$level]
+    $ui.StatusIconBg.Background = Get-Brush (Get-Tint $col '22')
+    $ui.StatusIcon.Foreground = Get-Brush $col
+    $ui.StatusIcon.Text = $glyph
+    $ui.StatusChip.Background = Get-Brush (Get-Tint $col '22')
+    $ui.StatusText.Foreground = Get-Brush $col
+    $ui.StatusText.Text = $text
 }
 
 function Show-Report([string]$path) {
-    $lv.Items.Clear()
-    try { $r = Get-ExeReport $path } catch { Add-Row 'שגיאה' $_.Exception.Message 'bad'; return $null }
-    Add-Row 'קובץ' $r.Path
-    Add-Row 'גודל' ('{0:N0} בתים ({1:N2} MB)' -f $r.SizeBytes, ($r.SizeBytes / 1MB))
-    Add-Row 'SHA-256' $r.Sha256
+    $ui.Rows.Children.Clear()
+    $ui.EmptyState.Visibility = 'Collapsed'
+    $ui.ResultPanel.Visibility = 'Visible'
+    $ui.FileName.Text = [IO.Path]::GetFileName($path)
+    $ui.FilePath.Text = $path
+    try { $r = Get-ExeReport $path } catch {
+        Set-Status 'bad' ([char]0xE783) 'שגיאה'
+        Add-Row 'שגיאה' $_.Exception.Message 'bad'
+        return $null
+    }
+
+    $signedByUs = $false
+    switch ($r.SigStatus) {
+        'Valid' {
+            if ($r.SigType -eq 'Catalog') { Set-Status 'ok' ([char]0xE73E) 'חתום (קטלוג Windows)' }
+            else { Set-Status 'ok' ([char]0xE73E) 'חתום ותקף' }
+        }
+        'NotSigned' { Set-Status 'warn' ([char]0xE7BA) 'לא חתום' }
+        'UnknownError' {
+            if ($r.Signer) { Set-Status 'warn' ([char]0xEA18) 'חתום · תעודה לא מאושרת' } else { Set-Status 'bad' ([char]0xE783) 'שגיאת חתימה' }
+        }
+        'HashMismatch' { Set-Status 'bad' ([char]0xE783) 'חתימה שבורה' }
+        default { Set-Status 'bad' ([char]0xE783) $r.SigStatus }
+    }
+    if (-not $r.Pe.IsPe -and $r.Path -notmatch '\.(msi|ps1|cab|cat|msix|appx)$') { Set-Status 'bad' ([char]0xE783) 'לא קובץ הפעלה' }
+
+    Add-Row 'גודל' ('{0:N2} MB  ({1:N0} bytes)' -f ($r.SizeBytes / 1MB), $r.SizeBytes) -Ltr
     if ($r.Pe.IsPe) {
         $kind = if ($r.Pe.IsDll) { 'DLL' } else { 'EXE' }
-        $net = if ($r.Pe.IsDotNet) { ' | .NET' } else { '' }
-        Add-Row 'מבנה PE' ('{0} תקין | {1} | {2} | {3}{4}' -f $kind, $r.Pe.Format, $r.Pe.Machine, $r.Pe.Subsystem, $net) 'ok'
+        $net = if ($r.Pe.IsDotNet) { '  ·  .NET' } else { '' }
+        Add-Row 'מבנה הקובץ' ('{0} תקין  ·  {1}  ·  {2}  ·  {3}{4}' -f $kind, $r.Pe.Format, $r.Pe.Machine, $r.Pe.Subsystem, $net) 'ok'
         Add-Row 'תאריך קומפילציה' ('{0:dd/MM/yyyy HH:mm} UTC' -f $r.Pe.LinkTime)
         if ($r.Pe.HasSignatureBlock -and $r.Pe.SignatureEndsAtEof -eq $false) {
             Add-Row 'אזהרה' 'יש נתונים אחרי בלוק החתימה (overlay). חתימה מחדש עלולה לשבור את הקובץ.' 'warn'
         }
     } elseif ($r.Path -match '\.(msi|ps1|cab|cat|msix|appx)$') {
-        Add-Row 'מבנה' 'לא PE - קובץ מסוג שתומך בחתימת Authenticode' 'info'
+        Add-Row 'מבנה הקובץ' 'לא PE, אבל זה סוג קובץ שאפשר לחתום עליו'
     } else {
-        Add-Row 'מבנה PE' ('לא תקין: ' + $r.Pe.Error) 'bad'
+        Add-Row 'מבנה הקובץ' ('לא תקין: ' + $r.Pe.Error) 'bad'
     }
     if ($r.ProductName) { Add-Row 'מוצר' $r.ProductName }
     if ($r.CompanyName) { Add-Row 'חברה' $r.CompanyName }
-    if ($r.FileVersion) { Add-Row 'גרסה' $r.FileVersion }
+    if ($r.FileVersion) { Add-Row 'גרסה' $r.FileVersion -Ltr }
     if ($r.Description) { Add-Row 'תיאור' $r.Description }
+    Add-Row 'SHA-256' $r.Sha256 -Ltr
 
     switch ($r.SigStatus) {
         'Valid'        { Add-Row 'חתימה דיגיטלית' 'חתום ותקף' 'ok' }
-        'NotSigned'    { Add-Row 'חתימה דיגיטלית' 'לא חתום' 'warn' }
+        'NotSigned'    { Add-Row 'חתימה דיגיטלית' 'הקובץ לא חתום' 'warn' }
         'UnknownError' {
             if ($r.Signer) { Add-Row 'חתימה דיגיטלית' 'חתום, אבל התעודה לא מאושרת במחשב הזה (תעודה עצמית)' 'warn' }
             else { Add-Row 'חתימה דיגיטלית' $r.SigMessage 'bad' }
         }
-        'HashMismatch' { Add-Row 'חתימה דיגיטלית' 'הקובץ שונה אחרי שנחתם - החתימה שבורה!' 'bad' }
+        'HashMismatch' { Add-Row 'חתימה דיגיטלית' 'הקובץ שונה אחרי שנחתם, החתימה שבורה' 'bad' }
         default        { Add-Row 'חתימה דיגיטלית' ($r.SigStatus + ': ' + $r.SigMessage) 'bad' }
     }
     if ($r.Signer) {
-        Add-Row 'חותם' $r.Signer
-        if ($r.SigType -eq 'Catalog') { Add-Row 'סוג חתימה' 'Catalog - חתימה דרך קטלוג של Windows (לא מוטמעת בקובץ)' }
-        elseif ($r.SigType) { Add-Row 'סוג חתימה' 'Authenticode - מוטמעת בקובץ' }
-        $tsText = if ($r.Timestamped) { 'יש' } else { 'אין' }
-        Add-Row 'חותמת זמן' $tsText
+        Add-Row 'חותם' $r.Signer -Ltr
+        if ($r.SigType -eq 'Catalog') { Add-Row 'סוג חתימה' 'קטלוג של Windows (לא מוטמעת בקובץ)' }
+        elseif ($r.SigType) { Add-Row 'סוג חתימה' 'Authenticode, מוטמעת בקובץ' }
+        if ($r.Timestamped) { Add-Row 'חותמת זמן' 'יש' 'ok' } else { Add-Row 'חותמת זמן' 'אין' 'warn' }
     }
     if ($r.FromInternet) { Add-Row 'מקור' 'הקובץ הורד מהאינטרנט (Mark of the Web)' 'warn' }
     return $r
+}
+
+function Update-Cert {
+    $c = Get-SignerCert $ui.TxtPublisher.Text
+    if (-not $c) {
+        $ui.CertDot.Fill = Get-Brush $Pal.muted
+        $ui.CertTitle.Text = 'עדיין אין תעודה'
+        $ui.CertDetail.Text = 'היא תיווצר אוטומטית כשתחתום על הקובץ הראשון.'
+        $ui.BtnTrust.IsEnabled = $false; $ui.BtnExport.IsEnabled = $false
+        return
+    }
+    $trusted = Test-CertTrustedLocally $c
+    if ($trusted) { $ui.CertDot.Fill = Get-Brush $Pal.ok; $ui.CertTitle.Text = 'מאושרת במחשב הזה' }
+    else { $ui.CertDot.Fill = Get-Brush $Pal.warn; $ui.CertTitle.Text = 'קיימת, עדיין לא מאושרת במחשב הזה' }
+    $ui.CertDetail.Text = ('בתוקף עד {0:dd/MM/yyyy}  ·  {1}' -f $c.NotAfter, $c.Thumbprint.Substring(0, 12))
+    $ui.BtnTrust.IsEnabled = -not $trusted
+    $ui.BtnExport.IsEnabled = $true
 }
 
 function Open-File([string]$path) {
     if (-not $path -or -not (Test-Path -LiteralPath $path)) { return }
     $script:CurrentFile = (Resolve-Path -LiteralPath $path).Path
     $script:LastOutput = $null
-    $btnOpen.Enabled = $false
+    $ui.BtnOpen.IsEnabled = $false
+    Show-Banner $null
     Write-Log ("Loaded " + $script:CurrentFile)
     $r = Show-Report $script:CurrentFile
-    $btnSign.Enabled = [bool]$r
-    if ($r -and $r.Signer -and $r.SigStatus -eq 'Valid') {
-        Write-Log 'Note: this file already has a valid signature. Signing again replaces it.'
+    $ui.BtnSign.IsEnabled = [bool]$r
+    if ($r -and $r.Signer -and $r.SigStatus -eq 'Valid' -and $r.SigType -ne 'Catalog') {
+        Show-Banner 'warn' 'לקובץ כבר יש חתימה תקפה. חתימה חדשה תחליף אותה.'
     }
 }
 
-# --- events -----------------------------------------------------------------
-$dragEnter = { param($s, $e) if ($e.Data.GetDataPresent([System.Windows.Forms.DataFormats]::FileDrop)) { $e.Effect = 'Copy' } }
-$dragDrop  = { param($s, $e) $files = $e.Data.GetData([System.Windows.Forms.DataFormats]::FileDrop); if ($files) { Open-File $files[0] } }
-$form.Add_DragEnter($dragEnter); $form.Add_DragDrop($dragDrop)
-$drop.Add_DragEnter($dragEnter); $drop.Add_DragDrop($dragDrop)
-$lv.AllowDrop = $true; $lv.Add_DragEnter($dragEnter); $lv.Add_DragDrop($dragDrop)
+function Set-Busy([bool]$busy) {
+    $ui.BtnSign.IsEnabled = -not $busy
+    $ui.Progress.Visibility = if ($busy) { 'Visible' } else { 'Hidden' }
+    $ui.SignText.Text = if ($busy) { 'חותם על הקובץ…' } else { 'חתום על הקובץ' }
+    $win.Cursor = if ($busy) { [Windows.Input.Cursors]::AppStarting } else { $null }
+}
 
-$drop.Add_Click({
-    $dlg = New-Object System.Windows.Forms.OpenFileDialog
-    $dlg.Filter = 'קבצי הפעלה (*.exe;*.dll;*.msi;*.sys)|*.exe;*.dll;*.msi;*.sys|כל הקבצים (*.*)|*.*'
-    if ($dlg.ShowDialog() -eq 'OK') { Open-File $dlg.FileName }
+function Set-DropHover([bool]$on) {
+    if ($on) { $ui.DropDash.Stroke = Get-Brush '#6C8CFF'; $ui.DropZone.Background = Get-Brush '#1A2045' }
+    else { $ui.DropDash.Stroke = Get-Brush '#39416E'; $ui.DropZone.Background = Get-Brush '#161A2E' }
+}
+
+# --- signing runs in a background runspace so the window stays responsive ---
+$timer = New-Object Windows.Threading.DispatcherTimer
+$timer.Interval = [TimeSpan]::FromMilliseconds(150)
+$timer.Add_Tick({
+    $m = $null
+    while ($script:LogQueue.TryDequeue([ref]$m)) { Write-Log $m }
+    $j = $script:SignJob
+    if ($j -and $j.Handle.IsCompleted) {
+        $timer.Stop()
+        $script:SignJob = $null
+        try {
+            [void]$j.PS.EndInvoke($j.Handle)
+            while ($script:LogQueue.TryDequeue([ref]$m)) { Write-Log $m }
+            Write-Log ("Signed: " + $j.Out)
+            $script:LastOutput = $j.Out
+            $ui.BtnOpen.IsEnabled = $true
+            [void](Show-Report $j.Out)
+            Update-Cert
+            Show-Banner 'ok' ('הקובץ נחתם בהצלחה: ' + [IO.Path]::GetFileName($j.Out))
+        } catch {
+            $ex = $_.Exception
+            while ($ex.InnerException) { $ex = $ex.InnerException }
+            Write-Log ("ERROR: " + $ex.Message)
+            Show-Banner 'bad' ('החתימה נכשלה: ' + $ex.Message)
+        } finally {
+            $j.PS.Dispose()
+            Set-Busy $false
+        }
+    }
 })
 
-$txtPublisher.Add_Leave({ Update-CertLabel; Save-Settings })
-$chkTs.Add_CheckedChanged({ Save-Settings })
-
-$btnSign.Add_Click({
-    if (-not $script:CurrentFile) { return }
-    $btnSign.Enabled = $false
-    $form.Cursor = 'WaitCursor'
-    try {
-        $pub = $txtPublisher.Text.Trim()
-        if (-not $pub) { $pub = $env:USERNAME; $txtPublisher.Text = $pub }
-        Save-Settings
+function Start-Sign {
+    if (-not $script:CurrentFile -or $script:SignJob) { return }
+    $pub = $ui.TxtPublisher.Text.Trim()
+    if (-not $pub) { $pub = $env:USERNAME; $ui.TxtPublisher.Text = $pub }
+    Save-Settings
+    if ($ui.ChkOverwrite.IsChecked) { $out = $script:CurrentFile }
+    else {
+        $dir = Split-Path $script:CurrentFile
+        $out = Join-Path $dir ([IO.Path]::GetFileNameWithoutExtension($script:CurrentFile) + '-signed' + [IO.Path]::GetExtension($script:CurrentFile))
+    }
+    Show-Banner $null
+    Set-Busy $true
+    $ps = [powershell]::Create()
+    [void]$ps.AddScript({
+        param($core, $in, $out, $pub, $ts, $q)
+        . $core
         $cert = Get-SignerCert $pub
         if (-not $cert) {
-            Write-Log "Creating a new code-signing certificate for '$pub' ..."
+            $q.Enqueue("Creating a new code-signing certificate for '$pub' ...")
             $cert = New-SignerCert $pub
-            Write-Log ("Certificate created: " + $cert.Thumbprint)
+            $q.Enqueue("Certificate created: " + $cert.Thumbprint)
         }
-        if ($chkOverwrite.Checked) {
-            $out = $script:CurrentFile
-        } else {
-            $dir = Split-Path $script:CurrentFile
-            $base = [System.IO.Path]::GetFileNameWithoutExtension($script:CurrentFile)
-            $ext = [System.IO.Path]::GetExtension($script:CurrentFile)
-            $out = Join-Path $dir ($base + '-signed' + $ext)
-        }
-        $res = Invoke-SignExe -InputPath $script:CurrentFile -OutputPath $out -Cert $cert -UseTimestamp $chkTs.Checked -Log { param($m) Write-Log $m }
-        Write-Log ("Signed: " + $out)
-        $script:LastOutput = $out
-        $btnOpen.Enabled = $true
-        [void](Show-Report $out)
-        Update-CertLabel
-        [System.Windows.Forms.MessageBox]::Show("הקובץ נחתם בהצלחה:`n$out", 'Exe Signer', 'OK', 'Information') | Out-Null
-    } catch {
-        Write-Log ("ERROR: " + $_.Exception.Message)
-        [System.Windows.Forms.MessageBox]::Show("החתימה נכשלה:`n" + $_.Exception.Message, 'Exe Signer', 'OK', 'Error') | Out-Null
-    } finally {
-        $form.Cursor = 'Default'
-        $btnSign.Enabled = $true
-    }
+        $null = Invoke-SignExe -InputPath $in -OutputPath $out -Cert $cert -UseTimestamp $ts -Log { param($msg) $q.Enqueue($msg) }
+    })
+    foreach ($a in @($CorePath, $script:CurrentFile, $out, $pub, [bool]$ui.ChkTs.IsChecked, $script:LogQueue)) { [void]$ps.AddArgument($a) }
+    $script:SignJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Out = $out }
+    $timer.Start()
+}
+
+# --- events -----------------------------------------------------------------
+$onDragOver = { param($s, $e)
+    if ($e.Data.GetDataPresent([Windows.DataFormats]::FileDrop)) { $e.Effects = 'Copy'; Set-DropHover $true } else { $e.Effects = 'None' }
+    $e.Handled = $true
+}
+$onDrop = { param($s, $e)
+    Set-DropHover $false
+    $files = $e.Data.GetData([Windows.DataFormats]::FileDrop)
+    if ($files) { Open-File $files[0] }
+    $e.Handled = $true
+}
+$win.Add_DragOver($onDragOver)
+$win.Add_Drop($onDrop)
+$win.Add_DragLeave({ Set-DropHover $false })
+
+$ui.DropZone.Add_MouseEnter({ if (-not $script:SignJob) { Set-DropHover $true } })
+$ui.DropZone.Add_MouseLeave({ Set-DropHover $false })
+$ui.DropZone.Add_MouseLeftButtonUp({
+    $dlg = New-Object Microsoft.Win32.OpenFileDialog
+    $dlg.Filter = 'קבצי הפעלה (*.exe;*.dll;*.msi;*.sys)|*.exe;*.dll;*.msi;*.sys|כל הקבצים (*.*)|*.*'
+    if ($dlg.ShowDialog($win)) { Open-File $dlg.FileName }
 })
 
-$btnTrust.Add_Click({
-    $c = Get-SignerCert $txtPublisher.Text
+$ui.BtnMin.Add_Click({ $win.WindowState = 'Minimized' })
+$ui.BtnMax.Add_Click({ $win.WindowState = if ($win.WindowState -eq 'Maximized') { 'Normal' } else { 'Maximized' } })
+$ui.BtnClose.Add_Click({ $win.Close() })
+$win.Add_StateChanged({
+    # WindowChrome maximizes slightly past the screen edge; pad it back in.
+    if ($win.WindowState -eq 'Maximized') { $ui.Root.Margin = '7'; $ui.BtnMax.Content = [string][char]0xE923 }
+    else { $ui.Root.Margin = '0'; $ui.BtnMax.Content = [string][char]0xE922 }
+})
+
+$ui.TxtPublisher.Add_LostFocus({ Update-Cert; Save-Settings })
+$ui.ChkTs.Add_Click({ Save-Settings })
+$ui.BtnSign.Add_Click({ Start-Sign })
+$ui.BtnLog.Add_Click({ $ui.LogPanel.Visibility = if ($ui.LogPanel.Visibility -eq 'Visible') { 'Collapsed' } else { 'Visible' } })
+$ui.BtnOpen.Add_Click({ if ($script:LastOutput) { Start-Process explorer.exe "/select,`"$($script:LastOutput)`"" } })
+
+$ui.BtnTrust.Add_Click({
+    $c = Get-SignerCert $ui.TxtPublisher.Text
     if (-not $c) { return }
-    $msg = "התעודה תתווסף לרשימת התעודות המהימנות של המשתמש שלך במחשב הזה בלבד.`nWindows יציג חלון אישור אבטחה - יש לאשר בו 'Yes'.`n`nלהמשיך?"
-    if ([System.Windows.Forms.MessageBox]::Show($msg, 'Exe Signer', 'YesNo', 'Question') -ne 'Yes') { return }
     try {
-        $ok = Install-SignerTrust $c
-        if ($ok) { Write-Log 'Certificate is now trusted for this user on this PC.' } else { Write-Log 'Certificate was not added (confirmation declined?).' }
-    } catch { Write-Log ("ERROR: " + $_.Exception.Message) }
-    Update-CertLabel
-    if ($script:LastOutput) { [void](Show-Report $script:LastOutput) } elseif ($script:CurrentFile) { [void](Show-Report $script:CurrentFile) }
+        if (Install-SignerTrust $c) { Write-Log 'Certificate is now trusted for this user on this PC.'; Show-Banner 'ok' 'התעודה מאושרת עכשיו במחשב הזה.' }
+        else { Show-Banner 'warn' 'התעודה לא נוספה (האישור של Windows בוטל?).' }
+    } catch { Write-Log ("ERROR: " + $_.Exception.Message); Show-Banner 'bad' $_.Exception.Message }
+    Update-Cert
+    $f = if ($script:LastOutput) { $script:LastOutput } else { $script:CurrentFile }
+    if ($f) { [void](Show-Report $f) }
 })
 
-$btnExport.Add_Click({
-    $c = Get-SignerCert $txtPublisher.Text
+$ui.BtnExport.Add_Click({
+    $c = Get-SignerCert $ui.TxtPublisher.Text
     if (-not $c) { return }
-    $dlg = New-Object System.Windows.Forms.SaveFileDialog
+    $dlg = New-Object Microsoft.Win32.SaveFileDialog
     $dlg.Filter = 'Certificate (*.cer)|*.cer'
-    $dlg.FileName = ($txtPublisher.Text.Trim() -replace '[\\/:*?"<>|]', '_') + '-codesign.cer'
-    if ($dlg.ShowDialog() -eq 'OK') {
+    $dlg.FileName = ($ui.TxtPublisher.Text.Trim() -replace '[\\/:*?"<>|]', '_') + '-codesign.cer'
+    if ($dlg.ShowDialog($win)) {
         Export-SignerCert $c $dlg.FileName
         Write-Log ("Exported public certificate to " + $dlg.FileName)
-        Write-Log 'On another PC: double-click the .cer > Install Certificate > Local Machine > "Trusted Root Certification Authorities", and again for "Trusted Publishers".'
+        Show-Banner 'ok' 'התעודה יוצאה. במחשב אחר: לחיצה כפולה על הקובץ, Install Certificate, ולהתקין ב-Trusted Root וב-Trusted Publishers.'
     }
 })
 
-$btnOpen.Add_Click({ if ($script:LastOutput) { Start-Process explorer.exe "/select,`"$($script:LastOutput)`"" } })
+# --- start ------------------------------------------------------------------
+$ui.TxtPublisher.Text = $settings.Publisher
+$ui.ChkTs.IsChecked = $settings.Timestamp
+Update-Cert
+Write-Log 'Ready. Drop an EXE to inspect it.'
+if ($ShowLog) { $ui.LogPanel.Visibility = 'Visible' }
 
-$form.Add_Shown({
-    Update-CertLabel
-    Write-Log 'Ready. Drop an EXE to inspect it.'
+if ($Screenshot) {
+    $win.WindowStartupLocation = 'Manual'; $win.Left = -20000; $win.Top = 0; $win.ShowActivated = $false
+}
+
+$win.Add_ContentRendered({
     if ($InitialFile) { Open-File $InitialFile }
+    if ($InitialFile -and $AutoSign) { Start-Sign }
+    if ($Screenshot) {
+        $script:ShotStarted = Get-Date
+        $script:ShotTimer = New-Object Windows.Threading.DispatcherTimer
+        $script:ShotTimer.Interval = [TimeSpan]::FromMilliseconds(1200)
+        $script:ShotTimer.Add_Tick({
+            # with -AutoSign, wait for signing to finish (max 60s)
+            if ($script:SignJob -and ((Get-Date) - $script:ShotStarted).TotalSeconds -lt 60) { return }
+            $script:ShotTimer.Stop()
+            $root = $ui.Root
+            $scale = 1.5
+            $w = $root.ActualWidth; $h = $root.ActualHeight
+            # Rendering an element of a right-to-left window directly comes out mirrored; flip it back.
+            $dv = New-Object Windows.Media.DrawingVisual
+            $dc = $dv.RenderOpen()
+            $dc.PushTransform((New-Object Windows.Media.MatrixTransform -1, 0, 0, 1, $w, 0))
+            $vb = New-Object Windows.Media.VisualBrush $root
+            $dc.DrawRectangle($vb, $null, (New-Object Windows.Rect 0, 0, $w, $h))
+            $dc.Close()
+            $rtb = New-Object Windows.Media.Imaging.RenderTargetBitmap ([int]($w * $scale)), ([int]($h * $scale)), (96 * $scale), (96 * $scale), ([Windows.Media.PixelFormats]::Pbgra32)
+            $rtb.Render($dv)
+            $enc = New-Object Windows.Media.Imaging.PngBitmapEncoder
+            $enc.Frames.Add([Windows.Media.Imaging.BitmapFrame]::Create($rtb))
+            $fs = [IO.File]::Create($Screenshot)
+            try { $enc.Save($fs) } finally { $fs.Dispose() }
+            $win.Close()
+        })
+        $script:ShotTimer.Start()
+    }
 })
 
-[void]$form.ShowDialog()
+[void]$win.ShowDialog()
