@@ -6,11 +6,34 @@
 
 ![הקובץ אחרי חתימה](docs/screenshot-signed.png)
 
-## הפעלה
+## התקנה בפקודה אחת
+פותחים PowerShell ומריצים:
+
+</div>
+
+```powershell
+irm https://raw.githubusercontent.com/dor2500/exe-signer/main/install.ps1 | iex
+```
+
+<div dir="rtl">
+
+הפקודה מורידה את הגרסה העדכנית ל-`%LOCALAPPDATA%\ExeSigner`, יוצרת קיצורי דרך בתפריט התחל ובשולחן העבודה ופותחת את האפליקציה. כדי לעדכן מריצים אותה שוב.
+
+הסרה:
+
+</div>
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/dor2500/exe-signer/main/install.ps1))) -Uninstall
+```
+
+<div dir="rtl">
+
+## הפעלה בלי התקנה
 - לחיצה כפולה על `ExeSigner.cmd`
 - או גרירה של קובץ EXE על `ExeSigner.cmd`
 
-לא צריך להתקין כלום. האפליקציה רצה על PowerShell ו-WPF שמגיעים עם Windows 10 ו-11.
+האפליקציה רצה על PowerShell ו-WPF שמגיעים עם Windows 10 ו-11.
 
 ## מה היא עושה
 
