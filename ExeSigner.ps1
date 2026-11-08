@@ -9,7 +9,8 @@ param(
     [string]$PfxPath,             # optional: preload a PFX/CER/CRT (password from $env:EXESIGNER_PFX_PASSWORD)
     [string]$CertKeyPath,         # optional: PEM private key for a .cer/.crt given in -PfxPath
     [string]$CompareSigned,       # optional: open compare mode with this signed file...
-    [string]$CompareUnsigned      # ...and this original unsigned file
+    [string]$CompareUnsigned,     # ...and this original unsigned file
+    [switch]$CompareAutoSign      # optional (automation): then "ignore and sign the original"
 )
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
@@ -618,15 +619,27 @@ if ($Mode) { $settings.Mode = $Mode }
                 <RowDefinition Height="*"/>
               </Grid.RowDefinitions>
               <Border Padding="22,20" BorderBrush="{StaticResource Stroke}" BorderThickness="0,0,0,1">
-                <StackPanel Orientation="Horizontal">
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                  </Grid.ColumnDefinitions>
                   <Border Name="CmpIconBg" Width="52" Height="52" CornerRadius="14" VerticalAlignment="Top">
                     <TextBlock Name="CmpIcon" Style="{StaticResource Icon}" FontSize="24"/>
                   </Border>
-                  <StackPanel Margin="16,0,0,0" VerticalAlignment="Center" MaxWidth="720">
+                  <StackPanel Grid.Column="1" Margin="16,0,16,0" VerticalAlignment="Center">
                     <TextBlock Name="CmpHeadline" Foreground="{StaticResource Fg}" FontSize="18" FontWeight="SemiBold" TextWrapping="Wrap"/>
                     <TextBlock Name="CmpSub" Foreground="{StaticResource Muted}" FontSize="13" Margin="0,4,0,0" TextWrapping="Wrap"/>
                   </StackPanel>
-                </StackPanel>
+                  <Button Name="BtnCmpSign" Grid.Column="2" Style="{StaticResource BtnPrimary}" VerticalAlignment="Center"
+                          Visibility="Collapsed" FontSize="14" Padding="16,12">
+                    <StackPanel Orientation="Horizontal">
+                      <TextBlock Style="{StaticResource Icon}" Text="&#xE70F;" FontSize="14" Margin="0,0,8,0"/>
+                      <TextBlock Name="BtnCmpSignText" Text="התעלם וחתום על המקורי"/>
+                    </StackPanel>
+                  </Button>
+                </Grid>
               </Border>
               <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                 <StackPanel Name="CmpRows" Margin="22,6,22,14"/>
@@ -1088,6 +1101,19 @@ function Show-Compare {
         Add-Row 'גרסה · חתום / מקורי' ((('' + $S.FileVersion), ('' + $U.FileVersion)) -join '  /  ') 'warn' -Ltr -Container $ui.CmpRows
     }
     if ($cc.UnsignedAlsoSigned) { Add-Row 'שים לב' 'גם הקובץ ה"מקורי" חתום. ההשוואה מתעלמת מהחתימות ובודקת רק את התוכן.' 'warn' -Container $ui.CmpRows }
+
+    # offer to sign the file in the "original" slot regardless of the comparison result
+    $origName = [IO.Path]::GetFileName($script:CmpUnsigned)
+    $ui.BtnCmpSignText.Text = "התעלם וחתום על $origName"
+    $ui.BtnCmpSign.Visibility = if ($cc.BothArePe) { 'Visible' } else { 'Collapsed' }
+}
+
+function Sign-OriginalFromCompare {
+    # ignore the comparison and sign the file dropped in the "original" slot, using the current certificate settings
+    if (-not $script:CmpUnsigned) { return }
+    $ui.TabSign.IsChecked = $true      # fires Set-AppMode 'sign'
+    Open-File $script:CmpUnsigned
+    Start-Sign
 }
 
 # --- signing runs in a background runspace so the window stays responsive ---
@@ -1222,6 +1248,7 @@ foreach ($z in $ui.DropSigned, $ui.DropUnsigned) {
         if ($dlg.ShowDialog($win)) { Open-CompareFile (Cmp-Slot $s) $dlg.FileName }
     })
 }
+$ui.BtnCmpSign.Add_Click({ Sign-OriginalFromCompare })
 
 $ui.ModeAuto.Add_Checked({ Set-Mode 'auto'; Save-Settings })
 $ui.ModeExisting.Add_Checked({ Set-Mode 'existing'; Save-Settings })
@@ -1294,6 +1321,7 @@ $win.Add_ContentRendered({
     if ($CompareSigned -and $CompareUnsigned) {
         Open-CompareFile 'signed' $CompareSigned
         Open-CompareFile 'unsigned' $CompareUnsigned
+        if ($CompareAutoSign) { Sign-OriginalFromCompare }
     }
     if ($Screenshot) {
         $script:ShotStarted = Get-Date
