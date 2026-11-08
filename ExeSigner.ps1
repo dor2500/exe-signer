@@ -665,6 +665,32 @@ function Get-Brush([string]$hex) { $bc.ConvertFromString($hex) }
 $Pal = @{ ok = '#3DDC97'; warn = '#FFB547'; bad = '#FF5C7A'; info = '#8FA8FF'; muted = '#8A90B4' }
 function Get-Tint([string]$hex, [string]$alpha = '24') { '#' + $alpha + $hex.TrimStart('#') }
 
+function New-AppPowerShell {
+    # Background runspace with the standard modules pre-imported. Relying on on-demand module
+    # loading can fail in a child runspace on some machines ("the module could not be loaded"),
+    # which breaks Get-AuthenticodeSignature and the Cert: provider. Importing them up front avoids that.
+    try {
+        $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+        $iss.ImportPSModule(@('Microsoft.PowerShell.Security', 'Microsoft.PowerShell.Management', 'Microsoft.PowerShell.Utility'))
+        $rs = [runspacefactory]::CreateRunspace($iss)
+        try { $rs.ApartmentState = 'MTA' } catch { }
+        $rs.Open()
+        $ps = [powershell]::Create()
+        $ps.Runspace = $rs
+        return $ps
+    } catch {
+        return [powershell]::Create()   # fall back to a default runspace
+    }
+}
+
+function Dispose-AppPowerShell($ps) {
+    if (-not $ps) { return }
+    $rs = $null
+    try { $rs = $ps.Runspace } catch { }
+    try { $ps.Dispose() } catch { }
+    if ($rs) { try { $rs.Dispose() } catch { } }
+}
+
 $script:CurrentFile = $null
 $script:LastOutput = $null
 $script:LogQueue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'
@@ -1031,7 +1057,7 @@ $cmpTimer.Add_Tick({
         $ex = $_.Exception; while ($ex.InnerException) { $ex = $ex.InnerException }
         Show-CompareError $ex.Message
     } finally {
-        $j.PS.Dispose()
+        Dispose-AppPowerShell $j.PS
     }
 })
 
@@ -1106,9 +1132,9 @@ function Show-CompareError([string]$msg) {
 
 function Show-Compare {
     if (-not ($script:CmpSigned -and $script:CmpUnsigned)) { return }
-    if ($script:CmpJob) { try { $script:CmpJob.PS.Stop() } catch { }; try { $script:CmpJob.PS.Dispose() } catch { }; $script:CmpJob = $null; $cmpTimer.Stop() }
+    if ($script:CmpJob) { try { $script:CmpJob.PS.Stop() } catch { }; Dispose-AppPowerShell $script:CmpJob.PS; $script:CmpJob = $null; $cmpTimer.Stop() }
     Show-CompareBusy
-    $ps = [powershell]::Create()
+    $ps = New-AppPowerShell
     [void]$ps.AddScript({ param($core, $a, $b); . $core; Get-CrossCheck $a $b })
     foreach ($arg in @($CorePath, $script:CmpSigned, $script:CmpUnsigned)) { [void]$ps.AddArgument($arg) }
     $script:CmpJob = @{ PS = $ps; Handle = $ps.BeginInvoke() }
@@ -1204,7 +1230,7 @@ $timer.Add_Tick({
             Write-Log ("ERROR: " + $ex.Message)
             Show-Banner 'bad' ('החתימה נכשלה: ' + $ex.Message)
         } finally {
-            $j.PS.Dispose()
+            Dispose-AppPowerShell $j.PS
             Set-Busy $false
         }
     }
@@ -1228,7 +1254,7 @@ function Start-Sign {
     }
     Show-Banner $null
     Set-Busy $true
-    $ps = [powershell]::Create()
+    $ps = New-AppPowerShell
     [void]$ps.AddScript({
         param($core, $in, $out, $pub, $ts, $q, $existing)
         . $core
@@ -1364,7 +1390,7 @@ if ($PfxPath) {
 } else {
     Set-Mode $settings.Mode
 }
-$ui.VersionLabel.Text = 'v1.2'
+$ui.VersionLabel.Text = 'v1.3'
 Write-Log 'Ready. Drop an EXE to inspect it.'
 if ($ShowLog) { $ui.LogPanel.Visibility = 'Visible' }
 
